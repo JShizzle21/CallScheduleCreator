@@ -1,0 +1,74 @@
+# ---------------------------------------
+# File Names Configuration
+# ---------------------------------------
+
+# Variables related to academic year start/end dates
+ACADEMIC_DATE_START_STRING: "2026-07-01"
+ACADEMIC_DATE_END_STRING: "2027-06-30"
+
+#Minimum number of days until you can do another call
+POST_CALL_DAYS: 2
+
+#Folder names
+DATA_DIR: "data"
+OUTPUT_DIR: "output"
+FLOW_XLSX: "data/flow.xlsx"
+HOLIDAYS_CSV: "data/holidays.csv"
+NO_CALL_DAYS_CSV: "data/no_call_days.csv"
+ROTATION_RULES_CSV: "data/rotation_rules.csv"
+SHEET_NAME: "master_block_calendar"
+
+#Number of times to run the simulation in order to seek best monte carlos score
+SIMULATION_RUNS: 300
+
+#name in the flow Excel document
+NIGHT_FLOAT_ROTATION_NAME: "NF"
+
+# ---------------------------------------
+# Call Scheduler Configuration
+# ---------------------------------------
+#Variables to change different weights in calculating the full schedule
+#program iterates through days from start to end of the year and assigns each resident a score on each day
+#Numbers are all relative to each other, however a lower score = more likely to be chosen for a call shift
+#these numbers are all "penalties" which mean they raise the score making it less likely to be assigned a call
+#on a given day
+
+#penalty applied to avoid getting call schedules on certain designated rotations
+AVOID_ROTATION_PENALTY: 200
+
+# ---------------------------------------
+# Spacing Rules
+# ---------------------------------------
+#to avoid having calls applied within this many days
+MIN_SPACING_DAYS_STRONG: 7 #days
+#to lower preference of having calls applied within this many days
+MIN_SPACING_DAYS_MILD: 14 #days
+#penalty applied to avoid scheduling call shifts within "strong" amount of days (ex. 7 days)
+SPACING_STRONG_PENALTY: 100
+ #penalty applied to avoid scheduling call shifts within "mild" amount of days (ex. 14 days)
+SPACING_MILD_PENALTY: 25
+
+
+# ---------------------------------------
+# PGY2 / PGY3 Year Balancing
+# ---------------------------------------
+#this causes PGY2 to be "front-loaded" with calls in the year and PGY3 to be "backloaded",
+# higher means this effect will be more dramatic, 0 means no difference
+YEAR_PROGRESS_MODIFIER: 50
+
+# ---------------------------------------
+# Fairness Tightness
+# ---------------------------------------
+#penalty to try and keep call shifts equal among residents
+MAX_DIFF_SOFT: 3
+  #If residency call differences get above this start applying "tightness_penalty"
+MAX_DIFF_HARD: 5
+  #If residency call differences get above this apply the "Hard_diff_penalty"
+#Bigger number means try to force more equality by making it less likely for a resident with
+# more calls already scheduled from getting a given call
+
+# Multiplier for fairness balancing.
+# Higher values force the scheduler to keep call counts closer together.
+TIGHTNESS_PENALTY: 100
+HARD_DIFF_PENALTY: 2000
+

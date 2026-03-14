@@ -1,0 +1,263 @@
+from datetime import date, timedelta
+
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from openpyxl.utils import get_column_letter
+
+from config import CONFIG
+
+NIGHT_FLOAT_ROTATION_NAME = CONFIG.get("NIGHT_FLOAT_ROTATION_NAME","NF") #name in the flow excell document
+DATA_DIR = CONFIG.get("DATA_DIR", "data")
+OUTPUT_DIR = CONFIG.get("OUTPUT_DIR","output")
+
+# ---------------- Exports ----------------
+
+def _autosize_columns(ws):
+    for col in range(1, ws.max_column + 1):
+        max_len = 0
+        col_letter = get_column_letter(col)
+        for cell in ws[col_letter]:
+            if cell.value is None:
+                continue
+            max_len = max(max_len, len(str(cell.value)))
+        ws.column_dimensions[col_letter].width = min(max_len + 2, 45)
+
+
+def _style_header(ws):
+    header_font = Font(bold=True)
+    for cell in ws[1]:
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center")
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+
+def write_call_totals_xlsx(residents: dict, path: str) -> None:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Summary"
+
+    headers = ["name", "pgy", "weekday_calls", "weekend_calls", "total_calls"]
+    ws.append(headers)
+
+    header_font = Font(bold=True)
+    for cell in ws[1]:
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center")
+    ws.freeze_panes = "A2"
+
+    pgy1_fill = PatternFill("solid", fgColor="D9EAD3")  # light green
+    pgy2_fill = PatternFill("solid", fgColor="CFE2F3")  # light blue
+    pgy3_fill = PatternFill("solid", fgColor="F4CCCC")  # light red/pink
+
+    for name in sorted(residents.keys()):
+        r = residents[name]
+        ws.append([
+            name,
+            r["pgy"],
+            r["weekday_calls"],
+            r["weekend_calls"],
+            r["total_calls"],
+        ])
+
+        row_i = ws.max_row
+        if r["pgy"] == 1:
+            fill = pgy1_fill
+        elif r["pgy"] == 2:
+            fill = pgy2_fill
+        else:
+            fill = pgy3_fill
+
+        for col in range(1, 6):
+            ws.cell(row=row_i, column=col).fill = fill
+
+    ws.column_dimensions["A"].width = 18
+    ws.column_dimensions["B"].width = 8
+    ws.column_dimensions["C"].width = 15
+    ws.column_dimensions["D"].width = 15
+    ws.column_dimensions["E"].width = 12
+
+    wb.save(path)
+
+def write_call_schedule_xlsx(
+    schedule_rows: list[dict],
+    holidays: dict,
+    no_call_days: dict,
+    path: str,
+    lookup,
+    intern_names: list[str]
+) -> None:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Daily Call List"
+
+    headers = ["Block", "Date", "Day", "Upper level", "Intern", "No Call"]
+    ws.append(headers)
+
+    header_font = Font(bold=True)
+    for cell in ws[1]:
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center")
+    ws.freeze_panes = "A2"
+
+    # Map date -> upper/intern
+    by_date = {}
+    for r in schedule_rows:
+        d = date.fromisoformat(r["date"])
+        slot = r["slot"]
+        name = (r.get("resident") or "").strip()
+
+        rec = by_date.setdefault(d, {"upper": "", "intern_weekend": ""})
+        if slot in ("UPPER_WEEKDAY", "UPPER_WEEKEND"):
+            rec["upper"] = name
+        elif slot == "INTERN_WEEKEND":
+            rec["intern_weekend"] = name
+
+    weekend_fill = PatternFill("solid", fgColor="FFF2CC")  # light yellow
+    holiday_fill = PatternFill("solid", fgColor="F8CBAD")  # light red
+    block_fill = PatternFill("solid", fgColor="D9EAD3")    # subtle green
+    thick_top = Border(top=Side(style="medium"))
+
+    # Build block lookup: date -> block number
+    date_to_block_num = {}
+    for i, block in enumerate(lookup.blocks, start=1):
+        cur = block.start
+        while cur <= block.end:
+            date_to_block_num[cur] = i
+            cur += timedelta(days=1)
+
+    block_start_dates = {block.start for block in lookup.blocks}
+
+    row_i = 2
+    for d in sorted(by_date.keys()):
+        upper = by_date[d]["upper"]
+
+        if d.weekday() >= 5:
+            intern_val = by_date[d]["intern_weekend"] or "0"
+        else:
+            nf_interns = []
+            for name in intern_names:
+                rot = lookup.rotation_on_date(name, d)
+                if rot == NIGHT_FLOAT_ROTATION_NAME:
+                    nf_interns.append(name)
+            intern_val = ", ".join(sorted(nf_interns)) if nf_interns else "0"
+
+        # No-call residents for this date
+        no_call_entries = []
+
+        for name, days in no_call_days.items():
+            if d in days:
+                reason = days[d]
+                if reason:
+                    no_call_entries.append(f"{name} ({reason})")
+                else:
+                    no_call_entries.append(name)
+
+        no_call_val = ", ".join(sorted(no_call_entries))
+
+        day_name = d.strftime("%a")
+
+        #add block number
+        block_num = date_to_block_num.get(d, "")
+        ws.append([block_num, d.isoformat(), day_name, upper, intern_val, no_call_val])
+
+        # Row coloring
+        if d in holidays:
+            fill = holiday_fill
+        elif d.weekday() >= 5:
+            fill = weekend_fill
+        else:
+            fill = None
+
+        if fill:
+            for col in range(1, 7):
+                ws.cell(row=row_i, column=col).fill = fill
+
+        # New block styling
+        if d in block_start_dates:
+            for col in range(1, 6):
+                ws.cell(row=row_i, column=col).border = thick_top
+                if col == 1:
+                    ws.cell(row=row_i, column=col).fill = block_fill
+                    ws.cell(row=row_i, column=col).font = Font(bold=True)
+
+        row_i += 1
+
+    ws.column_dimensions["A"].width = 8
+    ws.column_dimensions["B"].width = 12
+    ws.column_dimensions["C"].width = 6
+    ws.column_dimensions["D"].width = 20
+    ws.column_dimensions["E"].width = 20
+    ws.column_dimensions["F"].width = 40
+
+    wb.save(path)
+
+def write_audit(
+        audit_data,
+        path=f"{DATA_DIR}/{OUTPUT_DIR}/audit_report.txt"
+):
+    # --------------------------------------------------
+    # 9. Write report
+    # --------------------------------------------------
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("SCHEDULE AUDIT REPORT\n")
+        f.write("=" * 60 + "\n\n")
+
+        f.write("SCHEDULE GENERATION INFO\n")
+        f.write("-" * 60 + "\n")
+        f.write(f"Seed used: {audit_data['seed']}\n")
+        f.write(f"Tie-break decisions: {audit_data['tiebreaker_count']}\n")
+        f.write("\n")
+
+        f.write("\nFAIRNESS SUMMARY\n")
+        f.write("-" * 60 + "\n")
+        for key, value in audit_data["fairness_summary"].items():
+            f.write(f"{key}: {value}\n")
+
+        f.write("\nUNASSIGNED SLOTS\n")
+        f.write("-" * 60 + "\n")
+        if audit_data["unassigned_rows"]:
+            for row in audit_data["unassigned_rows"]:
+                f.write(
+                    f"{row.get('date', '')} | "
+                    f"{row.get('slot', '')} | "
+                    f"{row.get('holiday', '')} | "
+                    f"{row.get('reasons', '')}\n"
+                )
+        else:
+            f.write("No unassigned slots.\n")
+
+        f.write("\nAVOID ASSIGNMENTS USED\n")
+        f.write("-" * 60 + "\n")
+        if audit_data["avoid_assignments"]:
+            for d, resident, rotation, slot in audit_data["avoid_assignments"]:
+                f.write(f"{d} | {slot} | {resident} | {rotation}\n")
+        else:
+            f.write("No AVOID assignments used.\n")
+
+        f.write("\nERRORS\n")
+        f.write("-" * 60 + "\n")
+        if audit_data["errors"]:
+            for e in audit_data["errors"]:
+                f.write(f"{e}\n")
+        else:
+            f.write("No hard-rule violations found.\n")
+
+        f.write("\nWARNINGS\n")
+        f.write("-" * 60 + "\n")
+        if audit_data["warnings"]:
+            for w in audit_data["warnings"]:
+                f.write(f"{w}\n")
+        else:
+            f.write("No warnings.\n")
+
+    # Terminal summary
+    print("\nAUDIT COMPLETE")
+    print(f"Errors: {len(audit_data['errors'])}")
+    print(f"Warnings: {len(audit_data['warnings'])}")
+    print(f"Upper weekday diff: {audit_data['fairness_summary']['upper_weekday_diff']}")
+    print(f"Upper weekend diff: {audit_data['fairness_summary']['upper_weekend_diff']}")
+    print(f"Intern weekend diff: {audit_data['fairness_summary']['intern_weekend_diff']}")
+    print(f"Unassigned slots: {len(audit_data['unassigned_rows'])}")
+    print(f"AVOID assignments used: {len(audit_data['avoid_assignments'])}")
+    print(f"Tie-break decisions: {audit_data['tiebreaker_count']}")
+    print(f"Audit report written to: {path}")
