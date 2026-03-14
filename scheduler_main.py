@@ -435,7 +435,7 @@ def export_result(result):
 
 if __name__ == "__main__":
 
-    best_result = run_simulation(num_runs=SIMULATION_RUNS)
-    export_result(best_result)
+    #best_result = run_simulation(num_runs=SIMULATION_RUNS)
+    #export_result(best_result)
 
-    #export_result(generate_schedule_once(seed=211))
+    export_result(generate_schedule_once(seed=211))
