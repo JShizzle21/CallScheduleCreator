@@ -4,25 +4,8 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="ceac5b52-7e5f-44f8-8529-fd220c54052c" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/.idea/CallScheduleCreator.iml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/inspectionProfiles/profiles_settings.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/modules.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/config.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/data/README.txt" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/data/config.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/data/flow.xlsx" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/data/holidays.csv" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/data/no_call_days.csv" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/data/rotation_rules.csv" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/excel_reader.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/exports.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/loader.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/scheduler_main.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/validation.py" afterDir="false" />
+    <list default="true" id="ceac5b52-7e5f-44f8-8529-fd220c54052c" name="Changes" comment="Initial commit">
+      <change beforePath="$PROJECT_DIR$/data/README.txt" beforeDir="false" afterPath="$PROJECT_DIR$/README.txt" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -32,6 +15,18 @@
   <component name="Git.Settings">
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
   </component>
+  <component name="GitHubPullRequestSearchHistory"><![CDATA[{
+  "lastFilter": {
+    "state": "OPEN",
+    "assignee": "JShizzle21"
+  }
+}]]></component>
+  <component name="GithubPullRequestsUISettings"><![CDATA[{
+  "selectedUrlAndAccountId": {
+    "url": "https://github.com/JShizzle21/CallScheduleCreator.git",
+    "accountId": "c1c72aa2-8cd6-42b5-a76f-b22b5062c746"
+  }
+}]]></component>
   <component name="ProjectColorInfo"><![CDATA[{
   "associatedIndex": 7
 }]]></component>
@@ -63,6 +58,9 @@
 }]]></component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
+      <recent name="C:\Users\johnn\PycharmProjects\CallScheduleCreator" />
+    </key>
+    <key name="MoveFile.RECENT_KEYS">
       <recent name="C:\Users\johnn\PycharmProjects\CallScheduleCreator" />
     </key>
   </component>
@@ -112,12 +110,33 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1773525780890</updated>
-      <workItem from="1773525781903" duration="305000" />
+      <workItem from="1773525781903" duration="944000" />
     </task>
+    <task id="LOCAL-00001" summary="Initial commit">
+      <option name="closed" value="true" />
+      <created>1773526191997</created>
+      <option name="number" value="00001" />
+      <option name="presentableId" value="LOCAL-00001" />
+      <option name="project" value="LOCAL" />
+      <updated>1773526191998</updated>
+    </task>
+    <task id="LOCAL-00002" summary="Initial commit">
+      <option name="closed" value="true" />
+      <created>1773526663305</created>
+      <option name="number" value="00002" />
+      <option name="presentableId" value="LOCAL-00002" />
+      <option name="project" value="LOCAL" />
+      <updated>1773526663305</updated>
+    </task>
+    <option name="localTasksCounter" value="3" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
     <option name="version" value="3" />
+  </component>
+  <component name="VcsManagerConfiguration">
+    <MESSAGE value="Initial commit" />
+    <option name="LAST_COMMIT_MESSAGE" value="Initial commit" />
   </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
     <SUITE FILE_PATH="coverage/CallScheduleCreator$scheduler_main.coverage" NAME="scheduler_main Coverage Results" MODIFIED="1773525911328" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
