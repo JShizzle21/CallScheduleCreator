@@ -1,0 +1,51 @@
+# ---------------------------------------
+# File Names Configuration
+# ---------------------------------------
+
+# Variables related to academic year start/end dates
+ACADEMIC_DATE_START_STRING: "2026-07-01"
+ACADEMIC_DATE_END_STRING: "2027-06-30"
+
+# Minimum number of post-call days until another call can be assigned
+POST_CALL_DAYS: 2
+
+# Folder names
+DATA_DIR: "data"
+OUTPUT_DIR: "output"
+FLOW_XLSX: "data/flow.xlsx"
+HOLIDAYS_XLSX: "data/holidays.xlsx"
+NO_CALL_DAYS_XLSX: "data/no_call_days.xlsx"
+ROTATION_RULES_XLSX: "data/rotation_rules.xlsx"
+SHEET_NAME: "master_block_calendar"
+
+# Number of times to run the simulation in order to seek best Monte Carlo score
+SIMULATION_RUNS: 1000
+
+# Name in the flow Excel document
+NIGHT_FLOAT_ROTATION_NAME: "NF"
+
+# ---------------------------------------
+# Call Scheduler Configuration
+# ---------------------------------------
+AVOID_ROTATION_PENALTY: 200
+
+# ---------------------------------------
+# Spacing Rules
+# ---------------------------------------
+MIN_SPACING_DAYS_STRONG: 7
+MIN_SPACING_DAYS_MILD: 14
+SPACING_STRONG_PENALTY: 100
+SPACING_MILD_PENALTY: 25
+
+# ---------------------------------------
+# PGY2 / PGY3 Year Balancing
+# ---------------------------------------
+YEAR_PROGRESS_MODIFIER: 50
+
+# ---------------------------------------
+# Fairness Tightness
+# ---------------------------------------
+MAX_DIFF_SOFT: 3
+MAX_DIFF_HARD: 5
+TIGHTNESS_PENALTY: 100
+HARD_DIFF_PENALTY: 2000

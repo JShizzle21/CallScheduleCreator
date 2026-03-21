@@ -6,15 +6,17 @@ from datetime import date, timedelta
 from config import CONFIG
 
 DATA_DIR = CONFIG.get("DATA_DIR", "data")
-OUTPUT_DIR = CONFIG.get("OUTPUT_DIR","output")
+OUTPUT_DIR = CONFIG.get("OUTPUT_DIR", "output")
 POST_CALL_DAYS = CONFIG.get("POST_CALL_DAYS", 2)
-ACADEMIC_DATE_START_STRING = CONFIG.get("ACADEMIC_DATE_START_STRING","2026-07-01")
-ACADEMIC_DATE_END_STRING = CONFIG.get("ACADEMIC_DATE_END_STRING","2027-06-30")
+ACADEMIC_DATE_START_STRING = CONFIG.get("ACADEMIC_DATE_START_STRING", "2026-07-01")
+ACADEMIC_DATE_END_STRING = CONFIG.get("ACADEMIC_DATE_END_STRING", "2027-06-30")
 ACADEMIC_DATE_START = datetime.strptime(ACADEMIC_DATE_START_STRING, "%Y-%m-%d").date()
 ACADEMIC_DATE_END = datetime.strptime(ACADEMIC_DATE_END_STRING, "%Y-%m-%d").date()
 
+
 def is_weekend(d: date) -> bool:
-    return d.weekday() >= 5  # Sat/Sun
+    return d.weekday() >= 5
+
 
 def validate_rotations_against_rules(lookup, residents: Dict[str, dict], rules: Dict[Tuple[str, int], str]) -> None:
     missing = set()
@@ -27,7 +29,7 @@ def validate_rotations_against_rules(lookup, residents: Dict[str, dict], rules: 
             if not raw_rotation:
                 continue
 
-            parts = [part.strip() for part in raw_rotation.split("/")]
+            parts = [part.strip() for part in __import__("re").split(r"[\\/]", raw_rotation) if part.strip()]
 
             for rotation in parts:
                 key = (rotation, pgy)
@@ -41,57 +43,57 @@ def validate_rotations_against_rules(lookup, residents: Dict[str, dict], rules: 
 
         raise ValueError(
             "\nValidation failed: one or more rotations in the flow sheet do not exist "
-            "in rotation_rules.csv for the correct PGY."
+            "in rotation rules for the correct PGY."
         )
-    else:
-        #print("Rotation validation passed.")
-        return
 
 
 def validate_no_call_days(no_call_days: Dict[str, dict], residents: Dict[str, dict]) -> None:
     missing_names = sorted(name for name in no_call_days.keys() if name not in residents)
 
     if missing_names:
-        print("\nWARNING: Names in no_call_days.csv not found in flow sheet:\n")
+        print("\nWARNING: Names in no-call file not found in flow sheet:\n")
         for name in missing_names:
             print(f"  {name}")
 
         raise ValueError(
-            "\nValidation failed: one or more names in no_call_days.csv do not match "
+            "\nValidation failed: one or more names in the no-call input do not match "
             "the resident names in the flow sheet."
         )
-    else:
-        #print("No-call name validation passed.\n")
-        return
+
+
+def build_rotation_date_summary(lookup, residents: Dict[str, dict]) -> Dict[str, list[dict]]:
+    summary: Dict[str, list[dict]] = {}
+    for resident in sorted(residents.keys()):
+        rows = []
+        for seg in lookup.rotation_segments_for_resident(resident):
+            rows.append(
+                {
+                    "block": seg.block_index,
+                    "part": seg.part_index,
+                    "parts_total": seg.total_parts,
+                    "rotation": seg.rotation,
+                    "start": seg.start.isoformat(),
+                    "end": seg.end.isoformat(),
+                }
+            )
+        summary[resident] = rows
+    return summary
+
 
 def audit_schedule(
-        schedule_rows,
-        residents,
-        lookup,
-        rules,
-        no_call_days,
-        unassigned_rows,
-        holidays,
-        seed,
-        tiebreaker_count
+    schedule_rows,
+    residents,
+    lookup,
+    rules,
+    no_call_days,
+    unassigned_rows,
+    holidays,
+    seed,
+    tiebreaker_count,
 ):
-    """
-    Audits the generated schedule for:
-    - coverage issues
-    - PGY/slot rule violations
-    - no-call day violations
-    - NO_CALL rotation violations
-    - post-call violations
-    - duplicate same-day assignments
-    - spacing metrics
-    - fairness summaries
-    """
-
-
     errors = []
     warnings = []
 
-    # Organize schedule by date
     by_date = defaultdict(list)
     by_resident = defaultdict(list)
 
@@ -105,13 +107,8 @@ def audit_schedule(
         if resident:
             by_resident[resident].append((d, slot))
 
-    # --------------------------------------------------
-    # 1. Coverage audit
-    # --------------------------------------------------
     d = ACADEMIC_DATE_START
     while d <= ACADEMIC_DATE_END:
-
-        #Skip holidays while verifying dates
         if d in holidays:
             d += timedelta(days=1)
             continue
@@ -120,8 +117,6 @@ def audit_schedule(
 
         upper_count = sum(1 for r in rows if r["slot"] in ("UPPER_WEEKDAY", "UPPER_WEEKEND") and r.get("resident"))
         intern_count = sum(1 for r in rows if r["slot"] == "INTERN_WEEKEND" and r.get("resident"))
-
-
 
         if is_weekend(d):
             if upper_count != 1:
@@ -136,9 +131,6 @@ def audit_schedule(
 
         d += timedelta(days=1)
 
-    # --------------------------------------------------
-    # 2. Per-assignment hard rule audit
-    # --------------------------------------------------
     for d, rows in by_date.items():
         assigned_today = set()
 
@@ -155,23 +147,19 @@ def audit_schedule(
 
             pgy = residents[resident]["pgy"]
 
-            # Duplicate same-day assignment
             if resident in assigned_today:
                 errors.append(f"{d}: {resident} assigned more than once on same day")
             assigned_today.add(resident)
 
-            # PGY/slot check
             if slot == "INTERN_WEEKEND" and pgy != 1:
                 errors.append(f"{d}: {resident} assigned to intern weekend slot but is PGY{pgy}")
             if slot in ("UPPER_WEEKDAY", "UPPER_WEEKEND") and pgy == 1:
                 errors.append(f"{d}: {resident} assigned to upper slot but is PGY1")
 
-            # No-call day check
             resident_days = no_call_days.get(resident, {})
             if d in resident_days:
                 errors.append(f"{d}: {resident} assigned on no-call day")
 
-            # Rotation rule check
             rotation = lookup.rotation_on_date(resident, d)
             if rotation is None:
                 errors.append(f"{d}: {resident} has no rotation found")
@@ -186,9 +174,6 @@ def audit_schedule(
             if pref == "NO_CALL":
                 errors.append(f"{d}: {resident} assigned on NO_CALL rotation '{rotation}'")
 
-    # --------------------------------------------------
-    # 3. Post-call / consecutive day audit
-    # --------------------------------------------------
     for resident, assignments in by_resident.items():
         assignments = sorted(assignments, key=lambda x: x[0])
 
@@ -197,11 +182,8 @@ def audit_schedule(
             curr_date = assignments[i][0]
 
             if (curr_date - prev_date).days <= POST_CALL_DAYS:
-                errors.append(f"{resident}: assigned on consecutive days {prev_date} and {curr_date}")
+                errors.append(f"{resident}: assigned on consecutive/post-call restricted days {prev_date} and {curr_date}")
 
-    # --------------------------------------------------
-    # 4. Spacing audit (more than one call in 7 days)
-    # --------------------------------------------------
     under_7 = []
 
     for resident, assignments in by_resident.items():
@@ -218,9 +200,6 @@ def audit_schedule(
     for resident, prev_date, curr_date, spacing in under_7:
         warnings.append(f"{resident}: spacing < 7 days ({prev_date} -> {curr_date}, {spacing} days)")
 
-    # --------------------------------------------------
-    # 5. Fairness summary
-    # --------------------------------------------------
     uppers = [r for r in residents.values() if r["pgy"] in (2, 3)]
     interns = [r for r in residents.values() if r["pgy"] == 1]
 
@@ -232,24 +211,13 @@ def audit_schedule(
         "upper_weekday_min": min(upper_weekday_counts) if upper_weekday_counts else 0,
         "upper_weekday_max": max(upper_weekday_counts) if upper_weekday_counts else 0,
         "upper_weekday_diff": (max(upper_weekday_counts) - min(upper_weekday_counts)) if upper_weekday_counts else 0,
-
         "upper_weekend_min": min(upper_weekend_counts) if upper_weekend_counts else 0,
         "upper_weekend_max": max(upper_weekend_counts) if upper_weekend_counts else 0,
         "upper_weekend_diff": (max(upper_weekend_counts) - min(upper_weekend_counts)) if upper_weekend_counts else 0,
-
         "intern_weekend_min": min(intern_weekend_counts) if intern_weekend_counts else 0,
         "intern_weekend_max": max(intern_weekend_counts) if intern_weekend_counts else 0,
         "intern_weekend_diff": (max(intern_weekend_counts) - min(intern_weekend_counts)) if intern_weekend_counts else 0,
     }
-
-    # --------------------------------------------------
-    # 7. UNASSIGNED COUNT
-    # --------------------------------------------------
-    unassigned_count = len(unassigned_rows)
-
-    # --------------------------------------------------
-    # 8. AVOID ASSIGNMENTS
-    # --------------------------------------------------
 
     avoid_assignments = []
 
@@ -272,7 +240,30 @@ def audit_schedule(
             if pref == "AVOID":
                 avoid_assignments.append((d, resident, rotation, row["slot"]))
 
+    weekend_call_monthly = defaultdict(int)
+    weekend_call_overages = []
 
+    for resident, assignments in by_resident.items():
+        for assignment_date, slot in assignments:
+            if not is_weekend(assignment_date):
+                continue
+            month_key = assignment_date.strftime("%Y-%m")
+            weekend_call_monthly[(resident, month_key)] += 1
+
+    for (resident, month_key), count in sorted(weekend_call_monthly.items()):
+        if count > 4:
+            weekend_call_overages.append(
+                {
+                    "resident": resident,
+                    "month": month_key,
+                    "weekend_calls": count,
+                }
+            )
+            warnings.append(
+                f"{resident}: {count} weekend call shifts in {month_key} (possible <4 days off concern)"
+            )
+
+    rotation_date_summary = build_rotation_date_summary(lookup, residents)
 
     return {
         "errors": errors,
@@ -281,5 +272,7 @@ def audit_schedule(
         "avoid_assignments": avoid_assignments,
         "seed": seed,
         "tiebreaker_count": tiebreaker_count,
-        "unassigned_rows": unassigned_rows
+        "unassigned_rows": unassigned_rows,
+        "weekend_call_overages": weekend_call_overages,
+        "rotation_date_summary": rotation_date_summary,
     }

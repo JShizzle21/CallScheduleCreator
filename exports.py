@@ -6,11 +6,10 @@ from openpyxl.utils import get_column_letter
 
 from config import CONFIG
 
-NIGHT_FLOAT_ROTATION_NAME = CONFIG.get("NIGHT_FLOAT_ROTATION_NAME","NF") #name in the flow excell document
+NIGHT_FLOAT_ROTATION_NAME = CONFIG.get("NIGHT_FLOAT_ROTATION_NAME", "NF")
 DATA_DIR = CONFIG.get("DATA_DIR", "data")
-OUTPUT_DIR = CONFIG.get("OUTPUT_DIR","output")
+OUTPUT_DIR = CONFIG.get("OUTPUT_DIR", "output")
 
-# ---------------- Exports ----------------
 
 def _autosize_columns(ws):
     for col in range(1, ws.max_column + 1):
@@ -31,6 +30,7 @@ def _style_header(ws):
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
 
+
 def write_call_totals_xlsx(residents: dict, path: str) -> None:
     wb = Workbook()
     ws = wb.active
@@ -45,9 +45,9 @@ def write_call_totals_xlsx(residents: dict, path: str) -> None:
         cell.alignment = Alignment(horizontal="center")
     ws.freeze_panes = "A2"
 
-    pgy1_fill = PatternFill("solid", fgColor="D9EAD3")  # light green
-    pgy2_fill = PatternFill("solid", fgColor="CFE2F3")  # light blue
-    pgy3_fill = PatternFill("solid", fgColor="F4CCCC")  # light red/pink
+    pgy1_fill = PatternFill("solid", fgColor="D9EAD3")
+    pgy2_fill = PatternFill("solid", fgColor="CFE2F3")
+    pgy3_fill = PatternFill("solid", fgColor="F4CCCC")
 
     for name in sorted(residents.keys()):
         r = residents[name]
@@ -78,13 +78,14 @@ def write_call_totals_xlsx(residents: dict, path: str) -> None:
 
     wb.save(path)
 
+
 def write_call_schedule_xlsx(
     schedule_rows: list[dict],
     holidays: dict,
     no_call_days: dict,
     path: str,
     lookup,
-    intern_names: list[str]
+    intern_names: list[str],
 ) -> None:
     wb = Workbook()
     ws = wb.active
@@ -99,7 +100,6 @@ def write_call_schedule_xlsx(
         cell.alignment = Alignment(horizontal="center")
     ws.freeze_panes = "A2"
 
-    # Map date -> upper/intern
     by_date = {}
     for r in schedule_rows:
         d = date.fromisoformat(r["date"])
@@ -112,12 +112,11 @@ def write_call_schedule_xlsx(
         elif slot == "INTERN_WEEKEND":
             rec["intern_weekend"] = name
 
-    weekend_fill = PatternFill("solid", fgColor="FFF2CC")  # light yellow
-    holiday_fill = PatternFill("solid", fgColor="F8CBAD")  # light red
-    block_fill = PatternFill("solid", fgColor="D9EAD3")    # subtle green
+    weekend_fill = PatternFill("solid", fgColor="FFF2CC")
+    holiday_fill = PatternFill("solid", fgColor="F8CBAD")
+    block_fill = PatternFill("solid", fgColor="D9EAD3")
     thick_top = Border(top=Side(style="medium"))
 
-    # Build block lookup: date -> block number
     date_to_block_num = {}
     for i, block in enumerate(lookup.blocks, start=1):
         cur = block.start
@@ -141,9 +140,7 @@ def write_call_schedule_xlsx(
                     nf_interns.append(name)
             intern_val = ", ".join(sorted(nf_interns)) if nf_interns else "0"
 
-        # No-call residents for this date
         no_call_entries = []
-
         for name, days in no_call_days.items():
             if d in days:
                 reason = days[d]
@@ -153,14 +150,10 @@ def write_call_schedule_xlsx(
                     no_call_entries.append(name)
 
         no_call_val = ", ".join(sorted(no_call_entries))
-
         day_name = d.strftime("%a")
-
-        #add block number
         block_num = date_to_block_num.get(d, "")
         ws.append([block_num, d.isoformat(), day_name, upper, intern_val, no_call_val])
 
-        # Row coloring
         if d in holidays:
             fill = holiday_fill
         elif d.weekday() >= 5:
@@ -172,7 +165,6 @@ def write_call_schedule_xlsx(
             for col in range(1, 7):
                 ws.cell(row=row_i, column=col).fill = fill
 
-        # New block styling
         if d in block_start_dates:
             for col in range(1, 6):
                 ws.cell(row=row_i, column=col).border = thick_top
@@ -191,13 +183,8 @@ def write_call_schedule_xlsx(
 
     wb.save(path)
 
-def write_audit(
-        audit_data,
-        path=f"{DATA_DIR}/{OUTPUT_DIR}/audit_report.txt"
-):
-    # --------------------------------------------------
-    # 9. Write report
-    # --------------------------------------------------
+
+def write_audit(audit_data, path=f"{DATA_DIR}/{OUTPUT_DIR}/audit_report.txt"):
     with open(path, "w", encoding="utf-8") as f:
         f.write("SCHEDULE AUDIT REPORT\n")
         f.write("=" * 60 + "\n\n")
@@ -205,10 +192,9 @@ def write_audit(
         f.write("SCHEDULE GENERATION INFO\n")
         f.write("-" * 60 + "\n")
         f.write(f"Seed used: {audit_data['seed']}\n")
-        f.write(f"Tie-break decisions: {audit_data['tiebreaker_count']}\n")
-        f.write("\n")
+        f.write(f"Tie-break decisions: {audit_data['tiebreaker_count']}\n\n")
 
-        f.write("\nFAIRNESS SUMMARY\n")
+        f.write("FAIRNESS SUMMARY\n")
         f.write("-" * 60 + "\n")
         for key, value in audit_data["fairness_summary"].items():
             f.write(f"{key}: {value}\n")
@@ -234,7 +220,32 @@ def write_audit(
         else:
             f.write("No AVOID assignments used.\n")
 
-        f.write("\nERRORS\n")
+        f.write("\nWEEKEND CALLS > 4 IN A MONTH\n")
+        f.write("-" * 60 + "\n")
+        if audit_data.get("weekend_call_overages"):
+            for row in audit_data["weekend_call_overages"]:
+                f.write(
+                    f"{row['resident']} | {row['month']} | "
+                    f"{row['weekend_calls']} weekend call shifts\n"
+                )
+        else:
+            f.write("No residents exceeded 4 weekend call shifts in any month.\n")
+
+        f.write("\nROTATION DATE SUMMARY\n")
+        f.write("-" * 60 + "\n")
+        for resident, segments in audit_data.get("rotation_date_summary", {}).items():
+            f.write(f"{resident}\n")
+            for seg in segments:
+                if seg["parts_total"] == 1:
+                    label = f"  Block {seg['block']}"
+                else:
+                    label = f"  Block {seg['block']} part {seg['part']}/{seg['parts_total']}"
+                f.write(
+                    f"{label}: {seg['start']} -> {seg['end']} | {seg['rotation']}\n"
+                )
+            f.write("\n")
+
+        f.write("ERRORS\n")
         f.write("-" * 60 + "\n")
         if audit_data["errors"]:
             for e in audit_data["errors"]:
@@ -250,7 +261,6 @@ def write_audit(
         else:
             f.write("No warnings.\n")
 
-    # Terminal summary
     print("\nAUDIT COMPLETE")
     print(f"Errors: {len(audit_data['errors'])}")
     print(f"Warnings: {len(audit_data['warnings'])}")
@@ -259,5 +269,6 @@ def write_audit(
     print(f"Intern weekend diff: {audit_data['fairness_summary']['intern_weekend_diff']}")
     print(f"Unassigned slots: {len(audit_data['unassigned_rows'])}")
     print(f"AVOID assignments used: {len(audit_data['avoid_assignments'])}")
+    print(f"Weekend-call monthly overages: {len(audit_data.get('weekend_call_overages', []))}")
     print(f"Tie-break decisions: {audit_data['tiebreaker_count']}")
     print(f"Audit report written to: {path}")
