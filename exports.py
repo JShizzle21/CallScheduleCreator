@@ -36,7 +36,16 @@ def write_call_totals_xlsx(residents: dict, path: str) -> None:
     ws = wb.active
     ws.title = "Summary"
 
-    headers = ["name", "pgy", "weekday_calls", "weekend_calls", "total_calls"]
+    headers = [
+        "name",
+        "pgy",
+        "weekday_calls",
+        "weekend_calls",
+        "total_calls",
+        "Jul_Dec_calls",
+        "Jan_Jun_calls",
+    ]
+
     ws.append(headers)
 
     header_font = Font(bold=True)
@@ -57,6 +66,8 @@ def write_call_totals_xlsx(residents: dict, path: str) -> None:
             r["weekday_calls"],
             r["weekend_calls"],
             r["total_calls"],
+            r["Jul_Dec_calls"],
+            r["Jan_Jun_calls"],
         ])
 
         row_i = ws.max_row
@@ -67,7 +78,7 @@ def write_call_totals_xlsx(residents: dict, path: str) -> None:
         else:
             fill = pgy3_fill
 
-        for col in range(1, 6):
+        for col in range(1, 8):
             ws.cell(row=row_i, column=col).fill = fill
 
     ws.column_dimensions["A"].width = 18
@@ -75,6 +86,8 @@ def write_call_totals_xlsx(residents: dict, path: str) -> None:
     ws.column_dimensions["C"].width = 15
     ws.column_dimensions["D"].width = 15
     ws.column_dimensions["E"].width = 12
+    ws.column_dimensions["F"].width = 18
+    ws.column_dimensions["G"].width = 20
 
     wb.save(path)
 
@@ -194,6 +207,20 @@ def write_audit(audit_data, path=f"{DATA_DIR}/{OUTPUT_DIR}/audit_report.txt"):
         f.write(f"Seed used: {audit_data['seed']}\n")
         f.write(f"Tie-break decisions: {audit_data['tiebreaker_count']}\n\n")
 
+        f.write("RANKING CONFIGURATION\n")
+        f.write("-" * 60 + "\n")
+        rank_order = audit_data.get("rank_component_order", [])
+        f.write(f"Rank component order: {rank_order}\n\n")
+
+        f.write("FLOW SHEET INFO\n")
+        f.write("-" * 60 + "\n")
+        skipped_rows = audit_data.get("skipped_rows", [])
+        if skipped_rows:
+            f.write(f"Skipped Excel rows: {', '.join(str(r) for r in skipped_rows)}\n")
+        else:
+            f.write("Skipped Excel rows: None\n")
+        f.write("\n")
+
         f.write("FAIRNESS SUMMARY\n")
         f.write("-" * 60 + "\n")
         for key, value in audit_data["fairness_summary"].items():
@@ -264,6 +291,12 @@ def write_audit(audit_data, path=f"{DATA_DIR}/{OUTPUT_DIR}/audit_report.txt"):
     print("\nAUDIT COMPLETE")
     print(f"Errors: {len(audit_data['errors'])}")
     print(f"Warnings: {len(audit_data['warnings'])}")
+    skipped_rows = audit_data.get("skipped_rows", [])
+    if skipped_rows:
+        print(f"Skipped Excel rows: {', '.join(str(r) for r in skipped_rows)}")
+    else:
+        print("Skipped Excel rows: None")
+    print(f"Upper total diff: {audit_data['fairness_summary']['upper_total_diff']}")
     print(f"Upper weekday diff: {audit_data['fairness_summary']['upper_weekday_diff']}")
     print(f"Upper weekend diff: {audit_data['fairness_summary']['upper_weekend_diff']}")
     print(f"Intern weekend diff: {audit_data['fairness_summary']['intern_weekend_diff']}")
@@ -271,4 +304,5 @@ def write_audit(audit_data, path=f"{DATA_DIR}/{OUTPUT_DIR}/audit_report.txt"):
     print(f"AVOID assignments used: {len(audit_data['avoid_assignments'])}")
     print(f"Weekend-call monthly overages: {len(audit_data.get('weekend_call_overages', []))}")
     print(f"Tie-break decisions: {audit_data['tiebreaker_count']}")
+    print(f"Rank component order: {audit_data.get('rank_component_order', [])}")
     print(f"Audit report written to: {path}")

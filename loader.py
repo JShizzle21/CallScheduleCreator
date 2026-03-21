@@ -35,6 +35,8 @@ def load_residents(lookup) -> Dict[str, dict]:
             "weekend_calls": 0,
             "upper_calls": 0,
             "intern_calls": 0,
+            "Jul_Dec_calls": 0,
+            "Jan_Jun_calls": 0,
         }
 
     return residents

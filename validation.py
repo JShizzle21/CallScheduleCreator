@@ -206,14 +206,21 @@ def audit_schedule(
     upper_weekday_counts = [r["weekday_calls"] for r in uppers]
     upper_weekend_counts = [r["weekend_calls"] for r in uppers]
     intern_weekend_counts = [r["weekend_calls"] for r in interns]
+    upper_total_counts = [r["total_calls"] for r in uppers]
 
     fairness_summary = {
+        "upper_total_min": min(upper_total_counts) if upper_total_counts else 0,
+        "upper_total_max": max(upper_total_counts) if upper_total_counts else 0,
+        "upper_total_diff": (max(upper_total_counts) - min(upper_total_counts)) if upper_total_counts else 0,
+
         "upper_weekday_min": min(upper_weekday_counts) if upper_weekday_counts else 0,
         "upper_weekday_max": max(upper_weekday_counts) if upper_weekday_counts else 0,
         "upper_weekday_diff": (max(upper_weekday_counts) - min(upper_weekday_counts)) if upper_weekday_counts else 0,
+
         "upper_weekend_min": min(upper_weekend_counts) if upper_weekend_counts else 0,
         "upper_weekend_max": max(upper_weekend_counts) if upper_weekend_counts else 0,
         "upper_weekend_diff": (max(upper_weekend_counts) - min(upper_weekend_counts)) if upper_weekend_counts else 0,
+
         "intern_weekend_min": min(intern_weekend_counts) if intern_weekend_counts else 0,
         "intern_weekend_max": max(intern_weekend_counts) if intern_weekend_counts else 0,
         "intern_weekend_diff": (max(intern_weekend_counts) - min(intern_weekend_counts)) if intern_weekend_counts else 0,
@@ -265,6 +272,8 @@ def audit_schedule(
 
     rotation_date_summary = build_rotation_date_summary(lookup, residents)
 
+    skipped_rows = sorted(lookup.skip_rows)
+
     return {
         "errors": errors,
         "warnings": warnings,
@@ -275,4 +284,5 @@ def audit_schedule(
         "unassigned_rows": unassigned_rows,
         "weekend_call_overages": weekend_call_overages,
         "rotation_date_summary": rotation_date_summary,
+        "skipped_rows": skipped_rows,
     }

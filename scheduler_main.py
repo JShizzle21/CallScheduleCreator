@@ -18,26 +18,56 @@ OUTPUT_DIR = CONFIG.get("OUTPUT_DIR", "output")
 FLOW_XLSX = CONFIG.get("FLOW_XLSX", "data/flow.xlsx")
 SHEET_NAME = CONFIG.get("SHEET_NAME", "master_block_calendar")
 
-POST_CALL_DAYS = CONFIG.get("POST_CALL_DAYS", 2)
-SIMULATION_RUNS = CONFIG.get("SIMULATION_RUNS", 100)
+POST_CALL_DAYS = CONFIG.get("POST_CALL_DAYS")
+SIMULATION_RUNS = CONFIG.get("SIMULATION_RUNS")
 
-ACADEMIC_DATE_START_STRING = CONFIG.get("ACADEMIC_DATE_START_STRING", "2026-07-01")
-ACADEMIC_DATE_END_STRING = CONFIG.get("ACADEMIC_DATE_END_STRING", "2027-06-30")
-AVOID_ROTATION_PENALTY = CONFIG.get("AVOID_ROTATION_PENALTY", 200)
-MIN_SPACING_DAYS_STRONG = CONFIG.get("MIN_SPACING_DAYS_STRONG", 7)
-MIN_SPACING_DAYS_MILD = CONFIG.get("MIN_SPACING_DAYS_MILD", 14)
-SPACING_STRONG_PENALTY = CONFIG.get("SPACING_STRONG_PENALTY", 100)
-SPACING_MILD_PENALTY = CONFIG.get("SPACING_MILD_PENALTY", 25)
-YEAR_PROGRESS_MODIFIER = CONFIG.get("YEAR_PROGRESS_MODIFIER", 50)
-MAX_DIFF_SOFT = CONFIG.get("MAX_DIFF_SOFT", 3)
-MAX_DIFF_HARD = CONFIG.get("MAX_DIFF_HARD", 5)
-TIGHTNESS_PENALTY = CONFIG.get("TIGHTNESS_PENALTY", 100)
-HARD_DIFF_PENALTY = CONFIG.get("HARD_DIFF_PENALTY", 2000)
+ACADEMIC_DATE_START_STRING = CONFIG.get("ACADEMIC_DATE_START_STRING")
+ACADEMIC_DATE_END_STRING = CONFIG.get("ACADEMIC_DATE_END_STRING")
+MIN_SPACING_DAYS_STRONG = CONFIG.get("MIN_SPACING_DAYS_STRONG")
+MIN_SPACING_DAYS_MILD = CONFIG.get("MIN_SPACING_DAYS_MILD")
+FAIRNESS_WEIGHT = CONFIG.get("FAIRNESS_WEIGHT")
+SPACING_WEIGHT = CONFIG.get("SPACING_WEIGHT")
+#AVOID_WEIGHT = CONFIG.get("AVOID_WEIGHT")
+#YEAR_WEIGHT = CONFIG.get("YEAR_WEIGHT")
+#SOFT_DIFF_THRESHOLD = CONFIG.get("SOFT_DIFF_THRESHOLD")
+#HARD_DIFF_THRESHOLD = CONFIG.get("HARD_DIFF_THRESHOLD")
+#SOFT_DIFF_MULTIPLIER = CONFIG.get("SOFT_DIFF_MULTIPLIER")
+#HARD_DIFF_MULTIPLIER = CONFIG.get("HARD_DIFF_MULTIPLIER")
+
+#AVOID_ROTATION_PENALTY = CONFIG.get("AVOID_ROTATION_PENALTY")
+#SPACING_STRONG_PENALTY = CONFIG.get("SPACING_STRONG_PENALTY")
+#SPACING_MILD_PENALTY = CONFIG.get("SPACING_MILD_PENALTY")
+#YEAR_PROGRESS_MODIFIER = CONFIG.get("YEAR_PROGRESS_MODIFIER")
+#TIGHTNESS_PENALTY = CONFIG.get("TIGHTNESS_PENALTY")
+MAX_DIFF_SOFT = CONFIG.get("MAX_DIFF_SOFT")
+MAX_DIFF_HARD = CONFIG.get("MAX_DIFF_HARD")
+#MAX_DIFF_HARD_PENALTY = CONFIG.get("MAX_DIFF_HARD_PENALTY")
+#MAX_DIFF_SOFT_PENALTY = CONFIG.get("MAX_DIFF_SOFT_PENALTY")
+
+
+RANK_COMPONENT_ORDER = CONFIG.get("RANK_COMPONENT_ORDER")
+
+VALID_RANK_COMPONENTS = {
+    "hard_diff_flag",
+    "soft_diff_flag",
+    "fairness_gap",
+    "spacing_tier",
+    "avoid_flag",
+    "year_bias",
+}
+
+invalid_rank_keys = [k for k in RANK_COMPONENT_ORDER if k not in VALID_RANK_COMPONENTS]
+if invalid_rank_keys:
+    raise ValueError(
+        f"Invalid RANK_COMPONENT_ORDER entries: {invalid_rank_keys}. "
+        f"Valid options are: {sorted(VALID_RANK_COMPONENTS)}"
+    )
 
 ACADEMIC_DATE_START = datetime.strptime(ACADEMIC_DATE_START_STRING, "%Y-%m-%d").date()
 ACADEMIC_DATE_END = datetime.strptime(ACADEMIC_DATE_END_STRING, "%Y-%m-%d").date()
 ACADEMIC_YEAR_START = ACADEMIC_DATE_START.year
 TOTAL_YEAR_DAYS = (ACADEMIC_DATE_END - ACADEMIC_DATE_START).days
+FIRST_HALF_END = date(ACADEMIC_YEAR_START, 12, 31)
 
 SLOT_UPPER_WEEKDAY = "UPPER_WEEKDAY"
 SLOT_UPPER_WEEKEND = "UPPER_WEEKEND"
@@ -132,9 +162,16 @@ def pick_best_candidate(
     d: date,
     slot: str,
 ) -> Optional[Tuple[str, str]]:
+    """
+    Returns (chosen_name, rotation) or None.
+
+    Rank priority is configurable via RANK_COMPONENT_ORDER.
+    Lower rank tuple = better candidate.
+    """
     if not eligible:
         return None
 
+    # Decide which call counter matters for this slot
     if slot == SLOT_INTERN_WEEKEND:
         counter_key = "weekend_calls"
     elif slot == SLOT_UPPER_WEEKEND:
@@ -142,6 +179,7 @@ def pick_best_candidate(
     else:
         counter_key = "weekday_calls"
 
+    # Decide which resident pool to compare against
     if slot == SLOT_INTERN_WEEKEND:
         pool = [n for n, r in residents.items() if r["pgy"] == 1]
     elif slot in (SLOT_UPPER_WEEKDAY, SLOT_UPPER_WEEKEND):
@@ -150,45 +188,60 @@ def pick_best_candidate(
         pool = list(residents.keys())
 
     min_in_pool = min(residents[n][counter_key] for n in pool)
-
-    best_score: Optional[float] = None
-    best: List[Tuple[str, str]] = []
-
     prog = year_progress(d)
+
+    def spacing_tier(spacing: int) -> int:
+        """
+        Lower is better:
+          0 = no spacing concern
+          1 = mild spacing concern
+          2 = strong spacing concern
+        """
+        if spacing < MIN_SPACING_DAYS_STRONG:
+            return 2
+        elif spacing < MIN_SPACING_DAYS_MILD:
+            return 1
+        return 0
+
+    def year_bias(pgy: int) -> float:
+        """
+        Lower is better.
+
+        PGY3 gets favored earlier in the year.
+        PGY2 gets favored later in the year.
+        Interns get no year bias.
+        """
+        if slot == SLOT_INTERN_WEEKEND:
+            return 0.0
+        if pgy == 3:
+            return prog
+        elif pgy == 2:
+            return 1 - prog
+        return 0.0
+
+    ranked_candidates = []
 
     for name, pref, rotation in eligible:
         data = residents[name]
         pgy = data["pgy"]
 
-        diff = data[counter_key] - min_in_pool
-        score = diff * TIGHTNESS_PENALTY
-
-        if diff > MAX_DIFF_SOFT:
-            score += (diff - MAX_DIFF_SOFT) * TIGHTNESS_PENALTY
-
-        if diff > MAX_DIFF_HARD:
-            score += HARD_DIFF_PENALTY
-
+        fairness_gap = data[counter_key] - min_in_pool
         spacing = days_since_last_call(data, d)
-        if spacing < MIN_SPACING_DAYS_STRONG:
-            score += SPACING_STRONG_PENALTY
-        elif spacing < MIN_SPACING_DAYS_MILD:
-            score += SPACING_MILD_PENALTY
 
-        if pref == "AVOID":
-            score += AVOID_ROTATION_PENALTY
+        components = {
+            "hard_diff_flag": 1 if fairness_gap > MAX_DIFF_HARD else 0,
+            "soft_diff_flag": 1 if fairness_gap > MAX_DIFF_SOFT else 0,
+            "fairness_gap": fairness_gap,
+            "spacing_tier": spacing_tier(spacing),
+            "avoid_flag": 1 if pref == "AVOID" else 0,
+            "year_bias": year_bias(pgy),
+        }
 
-        if slot != SLOT_INTERN_WEEKEND:
-            if pgy == 3:
-                score += YEAR_PROGRESS_MODIFIER * prog
-            elif pgy == 2:
-                score += YEAR_PROGRESS_MODIFIER * (1 - prog)
+        rank = tuple(components[key] for key in RANK_COMPONENT_ORDER)
+        ranked_candidates.append((rank, name, rotation))
 
-        if best_score is None or score < best_score:
-            best_score = score
-            best = [(name, rotation)]
-        elif score == best_score:
-            best.append((name, rotation))
+    best_rank = min(rank for rank, _, _ in ranked_candidates)
+    best = [(name, rotation) for rank, name, rotation in ranked_candidates if rank == best_rank]
 
     global TIEBREAKER_COUNT
     if len(best) > 1:
@@ -203,6 +256,12 @@ def apply_assignment(residents: Dict[str, dict], name: str, slot: str, d: date) 
     data["assigned_dates"].append(d)
 
     data["total_calls"] += 1
+
+    if d <= FIRST_HALF_END:
+        data["Jul_Dec_calls"] += 1
+    else:
+        data["Jan_Jun_calls"] += 1
+
     if is_weekend(d):
         data["weekend_calls"] += 1
     else:
@@ -307,6 +366,8 @@ def generate_schedule_once(seed=None):
         tiebreaker_count=TIEBREAKER_COUNT,
     )
 
+    audit_data["rank_component_order"] = RANK_COMPONENT_ORDER
+
     return {
         "schedule_rows": schedule_rows,
         "residents": residents,
@@ -325,8 +386,9 @@ def monte_carlo_score(result):
     return (
         len(audit["errors"]),
         len(result["unassigned_rows"]),
-        fairness["upper_weekday_diff"],
+        fairness["upper_total_diff"],
         fairness["upper_weekend_diff"],
+        fairness["upper_weekday_diff"],
         fairness["intern_weekend_diff"],
         len(audit.get("avoid_assignments", [])),
         len(audit["warnings"]),
@@ -348,6 +410,9 @@ def run_simulation(num_runs=50):
             best_score = score
             best_result = result
 
+    print("Score= Errors, Unassigned dates, Upper total, Upper weekend, Upper weekday, Intern weekend, Avoid assignments, Warning")
+
+
     best_seed = best_result["audit_data"]["seed"]
 
     end = time.time()
@@ -365,6 +430,13 @@ def export_result(result):
     lookup = result["lookup"]
     holidays = result["holidays"]
     no_call = result["no_call"]
+
+    audit_data = result["audit_data"]
+    seed = audit_data.get("seed", "N/A")
+
+    print("\nFINAL SCHEDULE SELECTION")
+    print(f"Seed used: {seed}")
+    print(f"Tie-break decisions: {audit_data.get('tiebreaker_count', 0)}")
 
     intern_names = [n for n, r in residents.items() if r["pgy"] == 1]
 
@@ -390,4 +462,4 @@ if __name__ == "__main__":
     #best_result = run_simulation(num_runs=SIMULATION_RUNS)
     #export_result(best_result)
 
-    export_result(generate_schedule_once(seed=71))
+    export_result(generate_schedule_once(seed=87))
