@@ -25,43 +25,15 @@ ACADEMIC_DATE_START_STRING = CONFIG.get("ACADEMIC_DATE_START_STRING")
 ACADEMIC_DATE_END_STRING = CONFIG.get("ACADEMIC_DATE_END_STRING")
 MIN_SPACING_DAYS_STRONG = CONFIG.get("MIN_SPACING_DAYS_STRONG")
 MIN_SPACING_DAYS_MILD = CONFIG.get("MIN_SPACING_DAYS_MILD")
-FAIRNESS_WEIGHT = CONFIG.get("FAIRNESS_WEIGHT")
-SPACING_WEIGHT = CONFIG.get("SPACING_WEIGHT")
-#AVOID_WEIGHT = CONFIG.get("AVOID_WEIGHT")
-#YEAR_WEIGHT = CONFIG.get("YEAR_WEIGHT")
-#SOFT_DIFF_THRESHOLD = CONFIG.get("SOFT_DIFF_THRESHOLD")
-#HARD_DIFF_THRESHOLD = CONFIG.get("HARD_DIFF_THRESHOLD")
-#SOFT_DIFF_MULTIPLIER = CONFIG.get("SOFT_DIFF_MULTIPLIER")
-#HARD_DIFF_MULTIPLIER = CONFIG.get("HARD_DIFF_MULTIPLIER")
 
-#AVOID_ROTATION_PENALTY = CONFIG.get("AVOID_ROTATION_PENALTY")
-#SPACING_STRONG_PENALTY = CONFIG.get("SPACING_STRONG_PENALTY")
-#SPACING_MILD_PENALTY = CONFIG.get("SPACING_MILD_PENALTY")
-#YEAR_PROGRESS_MODIFIER = CONFIG.get("YEAR_PROGRESS_MODIFIER")
-#TIGHTNESS_PENALTY = CONFIG.get("TIGHTNESS_PENALTY")
 MAX_DIFF_SOFT = CONFIG.get("MAX_DIFF_SOFT")
 MAX_DIFF_HARD = CONFIG.get("MAX_DIFF_HARD")
-#MAX_DIFF_HARD_PENALTY = CONFIG.get("MAX_DIFF_HARD_PENALTY")
-#MAX_DIFF_SOFT_PENALTY = CONFIG.get("MAX_DIFF_SOFT_PENALTY")
 
+FAIRNESS_GAP_WEIGHT = CONFIG.get("FAIRNESS_GAP_WEIGHT")
+SPACING_WEIGHT = CONFIG.get("SPACING_WEIGHT")
+AVOID_WEIGHT = CONFIG.get("AVOID_WEIGHT")
+YEAR_BIAS_WEIGHT = CONFIG.get("YEAR_BIAS_WEIGHT")
 
-RANK_COMPONENT_ORDER = CONFIG.get("RANK_COMPONENT_ORDER")
-
-VALID_RANK_COMPONENTS = {
-    "hard_diff_flag",
-    "soft_diff_flag",
-    "fairness_gap",
-    "spacing_tier",
-    "avoid_flag",
-    "year_bias",
-}
-
-invalid_rank_keys = [k for k in RANK_COMPONENT_ORDER if k not in VALID_RANK_COMPONENTS]
-if invalid_rank_keys:
-    raise ValueError(
-        f"Invalid RANK_COMPONENT_ORDER entries: {invalid_rank_keys}. "
-        f"Valid options are: {sorted(VALID_RANK_COMPONENTS)}"
-    )
 
 ACADEMIC_DATE_START = datetime.strptime(ACADEMIC_DATE_START_STRING, "%Y-%m-%d").date()
 ACADEMIC_DATE_END = datetime.strptime(ACADEMIC_DATE_END_STRING, "%Y-%m-%d").date()
@@ -72,6 +44,68 @@ FIRST_HALF_END = date(ACADEMIC_YEAR_START, 12, 31)
 SLOT_UPPER_WEEKDAY = "UPPER_WEEKDAY"
 SLOT_UPPER_WEEKEND = "UPPER_WEEKEND"
 SLOT_INTERN_WEEKEND = "INTERN_WEEKEND"
+
+
+MONTE_CARLO_SCORE_ORDER = CONFIG.get(
+    "MONTE_CARLO_SCORE_ORDER",
+    [
+        "errors",
+        "unassigned",
+        "upper_weekend_diff",
+        "upper_weekday_diff",
+        "upper_total_diff",
+        "intern_weekend_diff",
+        "avoid_assignments",
+        "warnings",
+    ],
+)
+
+VALID_MONTE_CARLO_SCORE_KEYS = {
+    "errors",
+    "unassigned",
+    "upper_weekend_diff",
+    "upper_weekday_diff",
+    "upper_total_diff",
+    "intern_weekend_diff",
+    "avoid_assignments",
+    "warnings",
+}
+
+invalid_score_keys = [k for k in MONTE_CARLO_SCORE_ORDER if k not in VALID_MONTE_CARLO_SCORE_KEYS]
+if invalid_score_keys:
+    raise ValueError(
+        f"Invalid MONTE_CARLO_SCORE_ORDER entries: {invalid_score_keys}. "
+        f"Valid options are: {sorted(VALID_MONTE_CARLO_SCORE_KEYS)}"
+    )
+
+PICK_CANDIDATE_RANK_ORDER = CONFIG.get(
+    "PICK_CANDIDATE_RANK_ORDER",
+    [
+        "hard_diff_flag",
+        "soft_diff_flag",
+        "weighted_score",
+    ],
+)
+
+VALID_PICK_CANDIDATE_RANK_KEYS = {
+    "hard_diff_flag",
+    "soft_diff_flag",
+    "weighted_score",
+}
+
+invalid_pick_rank_keys = [
+    k for k in PICK_CANDIDATE_RANK_ORDER
+    if k not in VALID_PICK_CANDIDATE_RANK_KEYS
+]
+
+if invalid_pick_rank_keys:
+    raise ValueError(
+        f"Invalid PICK_CANDIDATE_RANK_ORDER entries: {invalid_pick_rank_keys}. "
+        f"Valid options are: {sorted(VALID_PICK_CANDIDATE_RANK_KEYS)}"
+    )
+
+
+
 
 
 def is_weekend(d: date) -> bool:
@@ -162,16 +196,9 @@ def pick_best_candidate(
     d: date,
     slot: str,
 ) -> Optional[Tuple[str, str]]:
-    """
-    Returns (chosen_name, rotation) or None.
-
-    Rank priority is configurable via RANK_COMPONENT_ORDER.
-    Lower rank tuple = better candidate.
-    """
     if not eligible:
         return None
 
-    # Decide which call counter matters for this slot
     if slot == SLOT_INTERN_WEEKEND:
         counter_key = "weekend_calls"
     elif slot == SLOT_UPPER_WEEKEND:
@@ -179,7 +206,6 @@ def pick_best_candidate(
     else:
         counter_key = "weekday_calls"
 
-    # Decide which resident pool to compare against
     if slot == SLOT_INTERN_WEEKEND:
         pool = [n for n, r in residents.items() if r["pgy"] == 1]
     elif slot in (SLOT_UPPER_WEEKDAY, SLOT_UPPER_WEEKEND):
@@ -191,12 +217,6 @@ def pick_best_candidate(
     prog = year_progress(d)
 
     def spacing_tier(spacing: int) -> int:
-        """
-        Lower is better:
-          0 = no spacing concern
-          1 = mild spacing concern
-          2 = strong spacing concern
-        """
         if spacing < MIN_SPACING_DAYS_STRONG:
             return 2
         elif spacing < MIN_SPACING_DAYS_MILD:
@@ -204,13 +224,6 @@ def pick_best_candidate(
         return 0
 
     def year_bias(pgy: int) -> float:
-        """
-        Lower is better.
-
-        PGY3 gets favored earlier in the year.
-        PGY2 gets favored later in the year.
-        Interns get no year bias.
-        """
         if slot == SLOT_INTERN_WEEKEND:
             return 0.0
         if pgy == 3:
@@ -228,16 +241,26 @@ def pick_best_candidate(
         fairness_gap = data[counter_key] - min_in_pool
         spacing = days_since_last_call(data, d)
 
-        components = {
-            "hard_diff_flag": 1 if fairness_gap > MAX_DIFF_HARD else 0,
-            "soft_diff_flag": 1 if fairness_gap > MAX_DIFF_SOFT else 0,
-            "fairness_gap": fairness_gap,
-            "spacing_tier": spacing_tier(spacing),
-            "avoid_flag": 1 if pref == "AVOID" else 0,
-            "year_bias": year_bias(pgy),
+        hard_diff_flag = 1 if fairness_gap > MAX_DIFF_HARD else 0
+        soft_diff_flag = 1 if fairness_gap > MAX_DIFF_SOFT else 0
+        spacing_value = spacing_tier(spacing)
+        avoid_value = 1 if pref == "AVOID" else 0
+        year_value = year_bias(pgy)
+
+        weighted_score = (
+            FAIRNESS_GAP_WEIGHT * fairness_gap
+            + SPACING_WEIGHT * spacing_value
+            + AVOID_WEIGHT * avoid_value
+            + YEAR_BIAS_WEIGHT * year_value
+        )
+
+        rank_components = {
+            "hard_diff_flag": hard_diff_flag,
+            "soft_diff_flag": soft_diff_flag,
+            "weighted_score": weighted_score,
         }
 
-        rank = tuple(components[key] for key in RANK_COMPONENT_ORDER)
+        rank = tuple(rank_components[key] for key in PICK_CANDIDATE_RANK_ORDER)
         ranked_candidates.append((rank, name, rotation))
 
     best_rank = min(rank for rank, _, _ in ranked_candidates)
@@ -247,8 +270,7 @@ def pick_best_candidate(
     if len(best) > 1:
         TIEBREAKER_COUNT += 1
 
-    chosen = random.choice(best)
-    return chosen
+    return random.choice(best)
 
 
 def apply_assignment(residents: Dict[str, dict], name: str, slot: str, d: date) -> None:
@@ -366,7 +388,14 @@ def generate_schedule_once(seed=None):
         tiebreaker_count=TIEBREAKER_COUNT,
     )
 
-    audit_data["rank_component_order"] = RANK_COMPONENT_ORDER
+    audit_data["pick_candidate_rank_order"] = PICK_CANDIDATE_RANK_ORDER
+    audit_data["pick_candidate_weights"] = {
+        "FAIRNESS_GAP_WEIGHT": FAIRNESS_GAP_WEIGHT,
+        "SPACING_WEIGHT": SPACING_WEIGHT,
+        "AVOID_WEIGHT": AVOID_WEIGHT,
+        "YEAR_BIAS_WEIGHT": YEAR_BIAS_WEIGHT,
+    }
+    audit_data["monte_carlo_score_order"] = MONTE_CARLO_SCORE_ORDER
 
     return {
         "schedule_rows": schedule_rows,
@@ -383,17 +412,22 @@ def monte_carlo_score(result):
     audit = result["audit_data"]
     fairness = audit["fairness_summary"]
 
-    return (
-        len(audit["errors"]),
-        len(result["unassigned_rows"]),
-        fairness["upper_total_diff"],
-        fairness["upper_weekend_diff"],
-        fairness["upper_weekday_diff"],
-        fairness["intern_weekend_diff"],
-        len(audit.get("avoid_assignments", [])),
-        len(audit["warnings"]),
-    )
+    score_components = {
+        "errors": len(audit["errors"]),
+        "unassigned": len(result["unassigned_rows"]),
+        "upper_total_diff": fairness["upper_total_diff"],
+        "upper_weekend_diff": fairness["upper_weekend_diff"],
+        "upper_weekday_diff": fairness["upper_weekday_diff"],
+        "intern_weekend_diff": fairness["intern_weekend_diff"],
+        "avoid_assignments": len(audit.get("avoid_assignments", [])),
+        "warnings": len(audit["warnings"]),
+    }
 
+    return tuple(score_components[key] for key in MONTE_CARLO_SCORE_ORDER)
+
+
+def format_monte_carlo_score(score):
+    return ", ".join(f"{key}={value}" for key, value in zip(MONTE_CARLO_SCORE_ORDER, score))
 
 def run_simulation(num_runs=50):
     start = time.time()
@@ -404,13 +438,11 @@ def run_simulation(num_runs=50):
         result = generate_schedule_once(seed=seed)
         score = monte_carlo_score(result)
 
-        print(f"Run {seed + 1}/{num_runs} | seed={seed} | score={score}")
+        print(f"Run {seed + 1}/{num_runs} | seed={seed} | {format_monte_carlo_score(score)}")
 
         if best_score is None or score < best_score:
             best_score = score
             best_result = result
-
-    print("Score= Errors, Unassigned dates, Upper total, Upper weekend, Upper weekday, Intern weekend, Avoid assignments, Warning")
 
 
     best_seed = best_result["audit_data"]["seed"]
@@ -459,7 +491,7 @@ def export_result(result):
 
 
 if __name__ == "__main__":
-    #best_result = run_simulation(num_runs=SIMULATION_RUNS)
-    #export_result(best_result)
+    best_result = run_simulation(num_runs=SIMULATION_RUNS)
+    export_result(best_result)
 
-    export_result(generate_schedule_once(seed=87))
+    #export_result(generate_schedule_once(seed=87))

@@ -64,15 +64,44 @@ MIN_SPACING_DAYS_MILD: 14
 MAX_DIFF_SOFT: 3
 MAX_DIFF_HARD: 4
 
-#Ranked list of how program prioritizing assigning a resident a given call shift
-#Order matters! Highest priority on top
-RANK_COMPONENT_ORDER:
-  - avoid_flag
-  - fairness_gap
+
+
+# ---------------------------------------
+# Weighted candidate ranking
+# ---------------------------------------
+# These weights are used inside the weighted score after the hard/soft
+# fairness thresholds are applied lexicographically.
+
+FAIRNESS_GAP_WEIGHT: 1.0
+SPACING_WEIGHT: 0.75
+AVOID_WEIGHT: 1.25
+YEAR_BIAS_WEIGHT: 1.0
+
+# ---------------------------------------
+# Monte Carlo schedule ranking priority
+# ---------------------------------------
+# Earlier items have higher priority when selecting the best full-year schedule.
+
+MONTE_CARLO_SCORE_ORDER:
+  - errors
+  - unassigned
+  - upper_weekend_diff
+  - upper_weekday_diff
+  - upper_total_diff
+  - intern_weekend_diff
+  - avoid_assignments
+  - warnings
+
+# ---------------------------------------
+# Pick-candidate rank priority
+# ---------------------------------------
+# Earlier items have higher priority when ranking eligible candidates.
+
+PICK_CANDIDATE_RANK_ORDER:
   - hard_diff_flag
   - soft_diff_flag
-  - spacing_tier
-  - year_bias
+  - weighted_score
+
 
 
 

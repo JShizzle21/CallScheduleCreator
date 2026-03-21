@@ -207,10 +207,20 @@ def write_audit(audit_data, path=f"{DATA_DIR}/{OUTPUT_DIR}/audit_report.txt"):
         f.write(f"Seed used: {audit_data['seed']}\n")
         f.write(f"Tie-break decisions: {audit_data['tiebreaker_count']}\n\n")
 
-        f.write("RANKING CONFIGURATION\n")
+        f.write("PICK CANDIDATE CONFIGURATION\n")
         f.write("-" * 60 + "\n")
-        rank_order = audit_data.get("rank_component_order", [])
-        f.write(f"Rank component order: {rank_order}\n\n")
+        pick_rank_order = audit_data.get("pick_candidate_rank_order", [])
+        pick_weights = audit_data.get("pick_candidate_weights", {})
+
+        f.write(f"Pick candidate rank order: {pick_rank_order}\n")
+        for key, value in pick_weights.items():
+            f.write(f"{key}: {value}\n")
+        f.write("\n")
+
+        f.write("MONTE CARLO CONFIGURATION\n")
+        f.write("-" * 60 + "\n")
+        score_order = audit_data.get("monte_carlo_score_order", [])
+        f.write(f"Monte Carlo score order: {score_order}\n\n")
 
         f.write("FLOW SHEET INFO\n")
         f.write("-" * 60 + "\n")
@@ -304,5 +314,7 @@ def write_audit(audit_data, path=f"{DATA_DIR}/{OUTPUT_DIR}/audit_report.txt"):
     print(f"AVOID assignments used: {len(audit_data['avoid_assignments'])}")
     print(f"Weekend-call monthly overages: {len(audit_data.get('weekend_call_overages', []))}")
     print(f"Tie-break decisions: {audit_data['tiebreaker_count']}")
-    print(f"Rank component order: {audit_data.get('rank_component_order', [])}")
+    print(f"Pick candidate rank order: {audit_data.get('pick_candidate_rank_order', [])}")
+    print(f"Pick candidate weights: {audit_data.get('pick_candidate_weights', {})}")
+    print(f"Monte Carlo score order: {audit_data.get('monte_carlo_score_order', [])}")
     print(f"Audit report written to: {path}")
