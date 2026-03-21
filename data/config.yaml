@@ -52,7 +52,7 @@ SPACING_MILD_PENALTY: 25
 # ---------------------------------------
 # PGY2 / PGY3 Year Balancing
 # ---------------------------------------
-#this causes PGY2 to be "front-loaded" with calls in the year and PGY3 to be "backloaded",
+#this causes PGY3 to be "front-loaded" with calls in the year and PGY2 to be "backloaded",
 # higher means this effect will be more dramatic, 0 means no difference
 YEAR_PROGRESS_MODIFIER: 50
 

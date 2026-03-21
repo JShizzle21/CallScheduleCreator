@@ -438,4 +438,5 @@ if __name__ == "__main__":
     #best_result = run_simulation(num_runs=SIMULATION_RUNS)
     #export_result(best_result)
 
+    #Enter number of ideal seed number from "run simulation"
     export_result(generate_schedule_once(seed=211))
