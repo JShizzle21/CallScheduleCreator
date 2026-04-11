@@ -25,12 +25,6 @@ SIMULATION_RUNS: 2000
 NIGHT_FLOAT_ROTATION_NAME: "NF"
 
 # ---------------------------------------
-# Call Scheduler Configuration
-# ---------------------------------------
-#Multiplier to score calculation if on an "avoid" rotation
-#AVOID_WEIGHT: 1.5
-
-# ---------------------------------------
 # Spacing Rules
 # ---------------------------------------
 #Number in days in which a penalty should be applied to avoid a call
@@ -70,11 +64,14 @@ MAX_DIFF_HARD: 4
 # Weighted candidate ranking
 # ---------------------------------------
 # These weights are used inside the weighted score after the hard/soft
-# fairness thresholds are applied lexicographically.
+# fairness thresholds and avoid_value are applied lexicographically.
+# Weights are normalized so each factor contributes at most 1.0 at its maximum:
+#   fairness_gap max ~ MAX_DIFF_HARD (4) -> weight 0.25
+#   spacing_tier max = 2               -> weight 0.5
+#   year_bias    max = 1.0             -> weight 1.0
 
-FAIRNESS_GAP_WEIGHT: 1.0
-SPACING_WEIGHT: 0.75
-AVOID_WEIGHT: 1.25
+FAIRNESS_GAP_WEIGHT: 0.25
+SPACING_WEIGHT: 0.5
 YEAR_BIAS_WEIGHT: 1.0
 
 # ---------------------------------------
@@ -100,6 +97,7 @@ MONTE_CARLO_SCORE_ORDER:
 PICK_CANDIDATE_RANK_ORDER:
   - hard_diff_flag
   - soft_diff_flag
+  - avoid_value
   - weighted_score
 
 
