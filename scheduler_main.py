@@ -11,8 +11,6 @@ from exports import write_call_totals_xlsx, write_call_schedule_xlsx, write_audi
 from loader import load_residents, load_no_call_days, load_holidays, load_rotation_rules
 from validation import validate_rotations_against_rules, validate_no_call_days, audit_schedule
 
-TIEBREAKER_COUNT = 0
-
 DATA_DIR = CONFIG.get("DATA_DIR", "data")
 OUTPUT_DIR = CONFIG.get("OUTPUT_DIR", "output")
 FLOW_XLSX = CONFIG.get("FLOW_XLSX", "data/flow.xlsx")
@@ -136,6 +134,39 @@ def is_post_call(resident_data, d):
     return False
 
 
+def _compute_weighted_score(
+    fairness_gap: int,
+    spacing_value: int,
+    avoid_value: int,
+    year_value: float,
+) -> float:
+    """Combine ranking components into a single scalar.
+
+    Each raw component lives on a different scale (fairness_gap is an
+    unbounded int, spacing_value is {0,1,2}, avoid/year are already in
+    [0,1]). We normalize each to roughly [0, 1] so the *_WEIGHT constants
+    express genuine relative importance — otherwise fairness_gap dominates
+    every other component once it grows past ~2.
+
+    fairness_gap is clipped at MAX_DIFF_SOFT: above that threshold the
+    soft/hard lexicographic gates have already separated candidates, so
+    losing resolution there is acceptable.
+    """
+    if MAX_DIFF_SOFT > 0:
+        fairness_norm = min(fairness_gap, MAX_DIFF_SOFT) / MAX_DIFF_SOFT
+    else:
+        fairness_norm = 1.0 if fairness_gap > 0 else 0.0
+
+    spacing_norm = spacing_value / 2  # spacing_value ∈ {0, 1, 2}
+
+    return (
+        FAIRNESS_GAP_WEIGHT * fairness_norm
+        + SPACING_WEIGHT * spacing_norm
+        + AVOID_WEIGHT * avoid_value
+        + YEAR_BIAS_WEIGHT * year_value
+    )
+
+
 def eligible_for_slot(
     lookup,
     residents: Dict[str, dict],
@@ -195,7 +226,8 @@ def pick_best_candidate(
     eligible: List[Tuple[str, str, str]],
     d: date,
     slot: str,
-) -> Optional[Tuple[str, str]]:
+    rng: random.Random,
+) -> Optional[Tuple[str, str, bool]]:
     if not eligible:
         return None
 
@@ -247,11 +279,11 @@ def pick_best_candidate(
         avoid_value = 1 if pref == "AVOID" else 0
         year_value = year_bias(pgy)
 
-        weighted_score = (
-            FAIRNESS_GAP_WEIGHT * fairness_gap
-            + SPACING_WEIGHT * spacing_value
-            + AVOID_WEIGHT * avoid_value
-            + YEAR_BIAS_WEIGHT * year_value
+        weighted_score = _compute_weighted_score(
+            fairness_gap=fairness_gap,
+            spacing_value=spacing_value,
+            avoid_value=avoid_value,
+            year_value=year_value,
         )
 
         rank_components = {
@@ -266,11 +298,9 @@ def pick_best_candidate(
     best_rank = min(rank for rank, _, _ in ranked_candidates)
     best = [(name, rotation) for rank, name, rotation in ranked_candidates if rank == best_rank]
 
-    global TIEBREAKER_COUNT
-    if len(best) > 1:
-        TIEBREAKER_COUNT += 1
-
-    return random.choice(best)
+    was_tiebreak = len(best) > 1
+    name, rotation = rng.choice(best)
+    return name, rotation, was_tiebreak
 
 
 def apply_assignment(residents: Dict[str, dict], name: str, slot: str, d: date) -> None:
@@ -296,11 +326,8 @@ def apply_assignment(residents: Dict[str, dict], name: str, slot: str, d: date) 
 
 
 def generate_schedule_once(seed=None):
-    global TIEBREAKER_COUNT
-    TIEBREAKER_COUNT = 0
-
-    if seed is not None:
-        random.seed(seed)
+    rng = random.Random(seed)
+    tiebreaker_count = 0
 
     lookup = ExcelRotationLookup(FLOW_XLSX, SHEET_NAME, ACADEMIC_YEAR_START)
     residents = load_residents(lookup)
@@ -343,7 +370,7 @@ def generate_schedule_once(seed=None):
             eligible, reasons = eligible_for_slot(
                 lookup, residents, rules, no_call, d, slot, intern_names, upper_names
             )
-            picked = pick_best_candidate(residents, eligible, d, slot)
+            picked = pick_best_candidate(residents, eligible, d, slot, rng)
 
             if picked is None:
                 schedule_rows.append({
@@ -362,7 +389,9 @@ def generate_schedule_once(seed=None):
                     "reasons": str(reasons),
                 })
             else:
-                name, rotation = picked
+                name, rotation, was_tiebreak = picked
+                if was_tiebreak:
+                    tiebreaker_count += 1
                 apply_assignment(residents, name, slot, d)
                 schedule_rows.append({
                     "date": d.isoformat(),
@@ -385,7 +414,7 @@ def generate_schedule_once(seed=None):
         unassigned_rows=unassigned_rows,
         holidays=holidays,
         seed=seed,
-        tiebreaker_count=TIEBREAKER_COUNT,
+        tiebreaker_count=tiebreaker_count,
     )
 
     audit_data["pick_candidate_rank_order"] = PICK_CANDIDATE_RANK_ORDER
