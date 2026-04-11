@@ -19,7 +19,7 @@ ROTATION_RULES_XLSX: "data/rotation_rules.xlsx"
 SHEET_NAME: "master_block_calendar"
 
 # Number of times to run the simulation in order to get the best Monte Carlo score
-SIMULATION_RUNS: 2000
+SIMULATION_RUNS: 1
 
 # Name in the flow Excel document
 NIGHT_FLOAT_ROTATION_NAME: "NF"
