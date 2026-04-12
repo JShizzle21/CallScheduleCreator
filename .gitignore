@@ -2,3 +2,15 @@
 /data/output/audit_report.txt
 /data/output/call_schedule.xlsx
 /data/output/call_totals.xlsx
+
+# Claude Code state and worktrees
+.claude/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
