@@ -33,6 +33,7 @@ def make_resident(
     *,
     weekday_calls: int = 0,
     weekend_calls: int = 0,
+    intern_calls: int = 0,
     last_call: date | None = None,
 ) -> dict:
     """Build a minimal resident dict matching loader.load_residents shape."""
@@ -43,7 +44,7 @@ def make_resident(
         "weekday_calls": weekday_calls,
         "weekend_calls": weekend_calls,
         "upper_calls": 0,
-        "intern_calls": 0,
+        "intern_calls": intern_calls,
         "Jul_Dec_calls": 0,
         "Jan_Jun_calls": 0,
     }
@@ -231,15 +232,16 @@ def test_avoid_pref_dispreferred():
 # Pool / counter selection by slot
 # ---------------------------------------------------------------------------
 
-def test_intern_weekend_uses_pgy1_pool_and_weekend_counter():
+def test_intern_weekend_uses_pgy1_pool_and_intern_calls_counter():
     """Intern slot must rank against the PGY1 pool only, and use
-    weekend_calls — not weekday_calls — for fairness_gap."""
+    intern_calls (total intern calls, weekday + weekend) for fairness_gap
+    so Block 1 weekday calls are factored in alongside weekend calls."""
     residents = {
-        # PGY1 candidates with same weekend_calls but different weekday_calls.
-        # weekday_calls should be ignored for an intern weekend slot.
-        "I1": make_resident(1, weekend_calls=0, weekday_calls=10,
+        # I1: fewer total intern_calls but more weekday_calls — intern_calls
+        #     is what matters, weekday_calls should be ignored.
+        "I1": make_resident(1, intern_calls=0, weekday_calls=10,
                             last_call=TEST_DATE - timedelta(days=30)),
-        "I2": make_resident(1, weekend_calls=2, weekday_calls=0,
+        "I2": make_resident(1, intern_calls=2, weekday_calls=0,
                             last_call=TEST_DATE - timedelta(days=30)),
         # An upper resident in the dict — must not affect the intern pool min.
         "U1": make_resident(2, weekend_calls=0,
@@ -252,7 +254,7 @@ def test_intern_weekend_uses_pgy1_pool_and_weekend_counter():
         slot=SLOT_INTERN_WEEKEND,
         rng=random.Random(0),
     )
-    # I1 has fewer weekend_calls, so wins regardless of weekday_calls.
+    # I1 has fewer intern_calls, so wins regardless of weekday_calls.
     assert result[0] == "I1"
 
 
