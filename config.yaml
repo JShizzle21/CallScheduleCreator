@@ -36,12 +36,6 @@ SIMULATION_RUNS: 1000
 NIGHT_FLOAT_ROTATION_NAME: "NF"
 
 # ---------------------------------------
-# Call Scheduler Configuration
-# ---------------------------------------
-#Multiplier to score calculation if on an "avoid" rotation
-#AVOID_WEIGHT: 1.5
-
-# ---------------------------------------
 # Spacing Rules
 # ---------------------------------------
 #Number in days in which a penalty should be applied to avoid a call
@@ -113,6 +107,7 @@ MONTE_CARLO_SCORE_ORDER:
 PICK_CANDIDATE_RANK_ORDER:
   - hard_diff_flag
   - soft_diff_flag
+  - avoid_value
   - weighted_score
 
 

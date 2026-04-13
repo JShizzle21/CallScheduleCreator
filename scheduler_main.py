@@ -37,7 +37,6 @@ MAX_DIFF_HARD = CONFIG.get("MAX_DIFF_HARD")
 
 FAIRNESS_GAP_WEIGHT = CONFIG.get("FAIRNESS_GAP_WEIGHT")
 SPACING_WEIGHT = CONFIG.get("SPACING_WEIGHT")
-AVOID_WEIGHT = CONFIG.get("AVOID_WEIGHT")
 YEAR_BIAS_WEIGHT = CONFIG.get("YEAR_BIAS_WEIGHT")
 FUTURE_AVAIL_WEIGHT = CONFIG.get("FUTURE_AVAIL_WEIGHT")
 
@@ -93,6 +92,7 @@ PICK_CANDIDATE_RANK_ORDER = CONFIG.get(
     [
         "hard_diff_flag",
         "soft_diff_flag",
+        "avoid_value",
         "weighted_score",
     ],
 )
@@ -100,6 +100,7 @@ PICK_CANDIDATE_RANK_ORDER = CONFIG.get(
 VALID_PICK_CANDIDATE_RANK_KEYS = {
     "hard_diff_flag",
     "soft_diff_flag",
+    "avoid_value",
     "weighted_score",
 }
 
@@ -335,6 +336,7 @@ def pick_best_candidate(
         rank_components = {
             "hard_diff_flag": hard_diff_flag,
             "soft_diff_flag": soft_diff_flag,
+            "avoid_value": avoid_value,
             "weighted_score": weighted_score,
         }
 
@@ -672,7 +674,6 @@ def generate_schedule_once(seed=None, completed_assignments=None):
     audit_data["pick_candidate_weights"] = {
         "FAIRNESS_GAP_WEIGHT": FAIRNESS_GAP_WEIGHT,
         "SPACING_WEIGHT": SPACING_WEIGHT,
-        "AVOID_WEIGHT": AVOID_WEIGHT,
         "YEAR_BIAS_WEIGHT": YEAR_BIAS_WEIGHT,
         "FUTURE_AVAIL_WEIGHT": FUTURE_AVAIL_WEIGHT,
     }
