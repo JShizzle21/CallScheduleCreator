@@ -17,6 +17,17 @@ HOLIDAYS_XLSX: "data/holidays.xlsx"
 NO_CALL_DAYS_XLSX: "data/no_call_days.xlsx"
 ROTATION_RULES_XLSX: "data/rotation_rules.xlsx"
 SHEET_NAME: "master_block_calendar"
+# Columns: name, date — one row per clinic day.
+# The day BEFORE each clinic will be blocked as a no-call day (pre_clinic_day).
+# Leave as-is if file does not exist; clinics are optional.
+CLINIC_DAYS_XLSX: "data/clinic_days.xlsx"
+# Partial year mode: set to a completed call schedule file path to restart mid-year.
+# Columns: date, [upper level name], [intern name] — blank cells mean no assignment.
+# Leave empty ("") to generate a full-year schedule from scratch.
+COMPLETED_CALLS_XLSX: ""
+# Block 1 intern daily calls: set to 1 if interns take call every weekday + weekend in Block 1
+# (same as upper level). Set to 0 if Block 1 interns use Night Float (weekdays don't count).
+INTERN_BLOCK1_WEEKDAY_CALLS: 1
 
 # Number of times to run the simulation in order to get the best Monte Carlo score
 SIMULATION_RUNS: 1000
