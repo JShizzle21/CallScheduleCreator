@@ -12,13 +12,27 @@ HOLIDAYS_XLSX = CONFIG.get("HOLIDAYS_XLSX", "data/holidays.xlsx")
 def load_residents(lookup) -> Dict[str, dict]:
     ws = lookup.ws
     skip_rows = lookup.skip_rows
+    separator_pgy_labels: dict = getattr(lookup, "separator_pgy_labels", {})
 
     residents = {}
     pgy = 1
+    separator_count = 0
 
     for r in range(3, ws.max_row + 1):
         if r in skip_rows:
-            pgy += 1
+            separator_count += 1
+            explicit_pgy = separator_pgy_labels.get(r)
+            if explicit_pgy is not None:
+                pgy = explicit_pgy
+            else:
+                pgy += 1
+                if pgy > 3:
+                    raise ValueError(
+                        f"Flow sheet has {separator_count} PGY separator rows, implying "
+                        f"PGY{pgy} which is unexpected. Expected at most 2 separators "
+                        f"(for PGY1/PGY2/PGY3). Check for extra header rows, or add "
+                        f"explicit PGY labels (e.g. 'PGY2') in column A of separator rows."
+                    )
             continue
 
         name = ws.cell(row=r, column=1).value

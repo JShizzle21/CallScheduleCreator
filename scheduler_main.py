@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import bisect
+import concurrent.futures
 import random
 import time
 from datetime import date, datetime, timedelta
@@ -31,6 +33,7 @@ FAIRNESS_GAP_WEIGHT = CONFIG.get("FAIRNESS_GAP_WEIGHT")
 SPACING_WEIGHT = CONFIG.get("SPACING_WEIGHT")
 AVOID_WEIGHT = CONFIG.get("AVOID_WEIGHT")
 YEAR_BIAS_WEIGHT = CONFIG.get("YEAR_BIAS_WEIGHT")
+FUTURE_AVAIL_WEIGHT = CONFIG.get("FUTURE_AVAIL_WEIGHT")
 
 
 ACADEMIC_DATE_START = datetime.strptime(ACADEMIC_DATE_START_STRING, "%Y-%m-%d").date()
@@ -139,18 +142,22 @@ def _compute_weighted_score(
     spacing_value: int,
     avoid_value: int,
     year_value: float,
+    future_avail_value: float = 0.0,
 ) -> float:
     """Combine ranking components into a single scalar.
 
     Each raw component lives on a different scale (fairness_gap is an
-    unbounded int, spacing_value is {0,1,2}, avoid/year are already in
-    [0,1]). We normalize each to roughly [0, 1] so the *_WEIGHT constants
-    express genuine relative importance — otherwise fairness_gap dominates
-    every other component once it grows past ~2.
+    unbounded int, spacing_value is {0,1,2}, avoid/year/future_avail are
+    already in [0,1]). We normalize each to roughly [0, 1] so the *_WEIGHT
+    constants express genuine relative importance.
 
     fairness_gap is clipped at MAX_DIFF_SOFT: above that threshold the
     soft/hard lexicographic gates have already separated candidates, so
     losing resolution there is acceptable.
+
+    future_avail_value: fraction of remaining call-eligible days this resident
+    has vs. the pool maximum. Higher = more days remaining = can be deferred =
+    less preferred now. Defaults to 0.0 (no look-ahead contribution).
     """
     if MAX_DIFF_SOFT > 0:
         fairness_norm = min(fairness_gap, MAX_DIFF_SOFT) / MAX_DIFF_SOFT
@@ -164,6 +171,7 @@ def _compute_weighted_score(
         + SPACING_WEIGHT * spacing_norm
         + AVOID_WEIGHT * avoid_value
         + YEAR_BIAS_WEIGHT * year_value
+        + FUTURE_AVAIL_WEIGHT * future_avail_value
     )
 
 
@@ -227,6 +235,7 @@ def pick_best_candidate(
     d: date,
     slot: str,
     rng: random.Random,
+    future_eligible: Optional[Dict[str, list]] = None,
 ) -> Optional[Tuple[str, str, bool]]:
     if not eligible:
         return None
@@ -264,6 +273,20 @@ def pick_best_candidate(
             return 1 - prog
         return 0.0
 
+    # Precompute future availability for each eligible candidate.
+    # remaining = # dates after d in their precomputed eligible list (static constraints only).
+    # Normalize within this eligible pool so the component is always in [0, 1].
+    # Higher remaining → more deferrable → higher score → less preferred now.
+    if future_eligible is not None:
+        future_remaining = {
+            name: len(future_eligible.get(name, [])) - bisect.bisect(future_eligible.get(name, []), d)
+            for name, _, _ in eligible
+        }
+        max_future_remaining = max(future_remaining.values(), default=0)
+    else:
+        future_remaining = {}
+        max_future_remaining = 0
+
     ranked_candidates = []
 
     for name, pref, rotation in eligible:
@@ -279,11 +302,17 @@ def pick_best_candidate(
         avoid_value = 1 if pref == "AVOID" else 0
         year_value = year_bias(pgy)
 
+        if max_future_remaining > 0:
+            future_avail_value = future_remaining.get(name, 0) / max_future_remaining
+        else:
+            future_avail_value = 0.0
+
         weighted_score = _compute_weighted_score(
             fairness_gap=fairness_gap,
             spacing_value=spacing_value,
             avoid_value=avoid_value,
             year_value=year_value,
+            future_avail_value=future_avail_value,
         )
 
         rank_components = {
@@ -325,6 +354,142 @@ def apply_assignment(residents: Dict[str, dict], name: str, slot: str, d: date) 
         data["upper_calls"] += 1
 
 
+def _undo_assignment(residents: Dict[str, dict], name: str, slot: str, d: date) -> None:
+    """Mirror of apply_assignment — remove one call and decrement all counters."""
+    data = residents[name]
+    data["assigned_dates"].remove(d)  # list.remove: O(n) but safe (each day assigned once)
+
+    data["total_calls"] -= 1
+
+    if d <= FIRST_HALF_END:
+        data["Jul_Dec_calls"] -= 1
+    else:
+        data["Jan_Jun_calls"] -= 1
+
+    if is_weekend(d):
+        data["weekend_calls"] -= 1
+    else:
+        data["weekday_calls"] -= 1
+
+    if slot == SLOT_INTERN_WEEKEND:
+        data["intern_calls"] -= 1
+    else:
+        data["upper_calls"] -= 1
+
+
+def local_swap_pass(
+    schedule_rows: list,
+    residents: Dict[str, dict],
+    lookup,
+    rules: Dict[Tuple[str, int], str],
+    no_call: Dict[str, dict],
+    max_iterations: int = 10,
+) -> int:
+    """Post-generation fairness repair: replace overscheduled residents with
+    underscheduled ones on days where both are eligible.
+
+    A swap is accepted when the candidate has at least 2 fewer calls in the
+    relevant counter (weekend_calls / weekday_calls) than the assigned resident.
+    The gap-of-2 requirement prevents oscillation across passes.
+
+    Returns the total number of swaps made across all iterations.
+    """
+    # Build index: (date_str, slot) → row position for O(1) lookup
+    row_index: Dict[Tuple[str, str], int] = {}
+    for i, row in enumerate(schedule_rows):
+        if row["resident"]:
+            row_index[(row["date"], row["slot"])] = i
+
+    intern_names = [n for n, r in residents.items() if r["pgy"] == 1]
+    upper_names = [n for n, r in residents.items() if r["pgy"] in (2, 3)]
+
+    total_swaps = 0
+
+    for _iteration in range(max_iterations):
+        iteration_swaps = 0
+
+        for (date_str, slot), row_idx in sorted(row_index.items()):
+            row = schedule_rows[row_idx]
+            if not row["resident"]:
+                continue
+
+            d = date.fromisoformat(date_str)
+            assigned = row["resident"]
+
+            if slot == SLOT_INTERN_WEEKEND:
+                pool = intern_names
+                counter_key = "weekend_calls"
+            elif slot == SLOT_UPPER_WEEKEND:
+                pool = upper_names
+                counter_key = "weekend_calls"
+            else:
+                pool = upper_names
+                counter_key = "weekday_calls"
+
+            assigned_count = residents[assigned][counter_key]
+
+            # Find the most underscheduled eligible candidate (gap ≥ 2 required)
+            best_candidate: Optional[Tuple[str, str]] = None
+            best_count = assigned_count - 1  # threshold: candidate must beat this
+
+            for candidate in pool:
+                if candidate == assigned:
+                    continue
+                cand_count = residents[candidate][counter_key]
+                if cand_count >= assigned_count - 1:
+                    continue  # gap < 2, skip to avoid oscillation
+                if cand_count >= best_count:
+                    continue  # not the most underscheduled so far
+
+                # Eligibility: no_call_day
+                if d in no_call.get(candidate, {}):
+                    continue
+
+                # Eligibility: post-call (candidate not assigned at d-1 or d-2)
+                if is_post_call(residents[candidate], d):
+                    continue
+
+                # Eligibility: rotation and preference
+                rotation = lookup.rotation_on_date(candidate, d)
+                if rotation is None:
+                    continue
+                pgy = residents[candidate]["pgy"]
+                pref = rules.get((rotation, pgy))
+                if pref is None or pref == "NO_CALL":
+                    continue
+
+                # Forward post-call spillover: adding d to candidate must not
+                # conflict with their existing assignments at d+1 or d+2
+                spillover = any(
+                    (d + timedelta(days=i)) in residents[candidate]["assigned_dates"]
+                    for i in range(1, POST_CALL_DAYS + 1)
+                )
+                if spillover:
+                    continue
+
+                best_count = cand_count
+                best_candidate = (candidate, rotation)
+
+            if best_candidate is None:
+                continue
+
+            candidate, rotation = best_candidate
+            _undo_assignment(residents, assigned, slot, d)
+            apply_assignment(residents, candidate, slot, d)
+
+            row["resident"] = candidate
+            row["pgy"] = residents[candidate]["pgy"]
+            row["rotation"] = rotation
+
+            iteration_swaps += 1
+
+        total_swaps += iteration_swaps
+        if iteration_swaps == 0:
+            break
+
+    return total_swaps
+
+
 def generate_schedule_once(seed=None):
     rng = random.Random(seed)
     tiebreaker_count = 0
@@ -340,6 +505,24 @@ def generate_schedule_once(seed=None):
 
     intern_names = [n for n, r in residents.items() if r["pgy"] == 1]
     upper_names = [n for n, r in residents.items() if r["pgy"] in (2, 3)]
+
+    # Precompute sorted lists of future call-eligible dates per resident.
+    # Uses static constraints only (rotation preference + no_call_days); post-call
+    # exclusions are dynamic and handled at assignment time by eligible_for_slot.
+    future_eligible: Dict[str, list] = {}
+    for name, data in residents.items():
+        pgy = data["pgy"]
+        dates = []
+        di = ACADEMIC_DATE_START
+        while di <= ACADEMIC_DATE_END:
+            if di not in holidays and di not in no_call.get(name, {}):
+                rotation = lookup.rotation_on_date(name, di)
+                if rotation is not None:
+                    pref = rules.get((rotation, pgy))
+                    if pref not in (None, "NO_CALL"):
+                        dates.append(di)
+            di += timedelta(days=1)
+        future_eligible[name] = dates  # ascending order — ready for bisect
 
     schedule_rows = []
     unassigned_rows = []
@@ -370,7 +553,7 @@ def generate_schedule_once(seed=None):
             eligible, reasons = eligible_for_slot(
                 lookup, residents, rules, no_call, d, slot, intern_names, upper_names
             )
-            picked = pick_best_candidate(residents, eligible, d, slot, rng)
+            picked = pick_best_candidate(residents, eligible, d, slot, rng, future_eligible)
 
             if picked is None:
                 schedule_rows.append({
@@ -405,6 +588,9 @@ def generate_schedule_once(seed=None):
 
         d += timedelta(days=1)
 
+    # Post-generation local swap pass: repair fairness imbalances the greedy missed.
+    swap_count = local_swap_pass(schedule_rows, residents, lookup, rules, no_call)
+
     audit_data = audit_schedule(
         schedule_rows=schedule_rows,
         residents=residents,
@@ -423,12 +609,15 @@ def generate_schedule_once(seed=None):
         "SPACING_WEIGHT": SPACING_WEIGHT,
         "AVOID_WEIGHT": AVOID_WEIGHT,
         "YEAR_BIAS_WEIGHT": YEAR_BIAS_WEIGHT,
+        "FUTURE_AVAIL_WEIGHT": FUTURE_AVAIL_WEIGHT,
     }
     audit_data["monte_carlo_score_order"] = MONTE_CARLO_SCORE_ORDER
+    audit_data["swap_improvements"] = swap_count
 
     return {
         "schedule_rows": schedule_rows,
         "residents": residents,
+        "rules": rules,
         "lookup": lookup,
         "holidays": holidays,
         "no_call": no_call,
@@ -458,29 +647,29 @@ def monte_carlo_score(result):
 def format_monte_carlo_score(score):
     return ", ".join(f"{key}={value}" for key, value in zip(MONTE_CARLO_SCORE_ORDER, score))
 
+def _score_seed(seed: int) -> tuple:
+    """Worker function: returns (seed, score_tuple). Must be top-level for pickling."""
+    result = generate_schedule_once(seed=seed)
+    return seed, monte_carlo_score(result)
+
+
 def run_simulation(num_runs=50):
     start = time.time()
-    best_result = None
-    best_score = None
+    seed_scores: list[tuple[int, tuple]] = []
 
-    for seed in range(num_runs):
-        result = generate_schedule_once(seed=seed)
-        score = monte_carlo_score(result)
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        futures = {executor.submit(_score_seed, seed): seed for seed in range(num_runs)}
+        for future in concurrent.futures.as_completed(futures):
+            seed, score = future.result()
+            seed_scores.append((seed, score))
+            print(f"[{len(seed_scores)}/{num_runs}] seed={seed} | {format_monte_carlo_score(score)}")
 
-        print(f"Run {seed + 1}/{num_runs} | seed={seed} | {format_monte_carlo_score(score)}")
-
-        if best_score is None or score < best_score:
-            best_score = score
-            best_result = result
-
-
-    best_seed = best_result["audit_data"]["seed"]
+    best_seed, best_score = min(seed_scores, key=lambda x: x[1])
+    best_result = generate_schedule_once(seed=best_seed)
 
     end = time.time()
     print(f"\nSimulation completed in {end - start:.2f} seconds")
-    print("Best run selected:")
-    print(f"Seed: {best_seed}")
-    print(f"Score: {best_score}\n")
+    print(f"Best run: seed={best_seed} | {format_monte_carlo_score(best_score)}\n")
 
     return best_result
 

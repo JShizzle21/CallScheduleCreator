@@ -37,7 +37,9 @@ data/holidays.xlsx      ──► loader.load_holidays()
 
 scheduler_main.generate_schedule_once(seed)
     ├── validate inputs (validation.py)
+    ├── precompute future_eligible per resident (static rotation + no_call_days)
     ├── day loop: eligible_for_slot → pick_best_candidate → apply_assignment
+    ├── local_swap_pass (post-generation fairness repair, up to 10 iterations)
     └── audit_schedule (validation.py) → returns result dict
 
 scheduler_main.run_simulation(num_runs)
@@ -64,12 +66,23 @@ export_result(result)
 Two-level system applied lexicographically per `PICK_CANDIDATE_RANK_ORDER`:
 
 1. **Gates** (`hard_diff_flag`, `soft_diff_flag`): hard/soft fairness thresholds compared against pool min
-2. **Weighted score** (`_compute_weighted_score`): all four components normalized to [0,1] before weighting so `*_WEIGHT` constants behave as true relative importance
+2. **Weighted score** (`_compute_weighted_score`): all five components normalized to [0,1] before weighting so `*_WEIGHT` constants behave as true relative importance
 
-All four weighted-score components are normalized:
+All five weighted-score components are normalized:
 - `fairness_norm = min(gap, MAX_DIFF_SOFT) / MAX_DIFF_SOFT`
 - `spacing_norm = spacing_tier / 2` (tier ∈ {0,1,2})
-- `avoid_value` and `year_bias` already in [0,1]
+- `avoid_value`, `year_bias`, and `future_avail_norm` already in [0,1]
+
+`future_avail_norm` is the fraction of remaining call-eligible days this resident has vs. the pool maximum on the current day. Precomputed once per seed using static constraints (rotation + no_call_days, not post-call). Residents about to enter long NO_CALL rotations score low (preferred now).
+
+### Post-generation local swap pass (`local_swap_pass`)
+
+After the greedy day loop, runs up to 10 passes over all assigned slots looking for improving swaps. A swap replaces resident A with resident B on a given day when:
+- B has ≥ 2 fewer calls of the relevant type (gap-of-2 prevents oscillation across passes)
+- B is eligible: correct rotation, no no_call_day, not post-call, no forward spillover conflict at D+1/D+2
+- `_undo_assignment` mirrors `apply_assignment` to reverse all six counters
+
+`swap_improvements` count is recorded in `audit_data`. The audit runs after all swap passes so reported metrics reflect the improved schedule.
 
 ### Monte Carlo scoring
 
@@ -84,13 +97,11 @@ All four weighted-score components are normalized:
 | `MIN_SPACING_DAYS_STRONG/MILD` | Soft spacing thresholds — only affect `spacing_tier` in weighted score, not eligibility |
 | `MAX_DIFF_SOFT/HARD` | Fairness gate thresholds for `soft_diff_flag` / `hard_diff_flag` |
 | `FAIRNESS_GAP_WEIGHT` etc. | Relative importance of each weighted-score component (all normalized to [0,1]) |
+| `FUTURE_AVAIL_WEIGHT` | Look-ahead bias toward residents with fewer remaining eligible call days |
 | `PICK_CANDIDATE_RANK_ORDER` | Order of rank components; gates must precede `weighted_score` or the hard-diff gate is bypassed |
 | `MONTE_CARLO_SCORE_ORDER` | Priority of schedule-level metrics when selecting the best MC run |
 
-## Known limitations / future work
 
-- **PGY assignment is fragile**: PGY is inferred by counting skip-rows in `loader.py`; reordering the flow sheet silently produces wrong PGYs
-- **Greedy day-by-day has no recovery**: a local swap post-pass or CP-SAT solver would improve schedule quality
-- **`CONFIG.get` silently returns `None`** for missing required keys, causing cryptic downstream errors — a required-key check at startup is missing
-- **Parallel Monte Carlo**: `generate_schedule_once` is now a pure function of seed, so `ProcessPoolExecutor` over seeds is straightforward
-- Holidays are marked unassigned and require manual assignment
+## Applied Learning
+
+When something fails repeatedly, when Johnny has to re-explain, or when a workaround is found for a a platform/tool limitation, add a one-line bullet here. Keep each bullet under 15 words. No explanations. Only add things that will save time in future sessions.
