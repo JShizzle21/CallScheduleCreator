@@ -76,6 +76,8 @@ FAIRNESS_GAP_WEIGHT: 3.0
 SPACING_WEIGHT: 1.0
 AVOID_WEIGHT: 0.25
 YEAR_BIAS_WEIGHT: 1.5
+# Prefer residents with fewer remaining call-eligible days (about to enter NO_CALL rotations)
+FUTURE_AVAIL_WEIGHT: 1.0
 
 # ---------------------------------------
 # Monte Carlo schedule ranking priority
