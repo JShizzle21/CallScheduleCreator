@@ -18,6 +18,20 @@ def looks_like_block_date(text: str) -> bool:
     return bool(re.search(r"(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)", text) and "-" in text)
 
 
+def _parse_pgy_label(text) -> Optional[int]:
+    """Return an explicit PGY number from a cell label such as 'PGY2', 'PGY-2',
+    'R2', or 'Interns', or None if the text does not look like a PGY label."""
+    if text is None:
+        return None
+    s = str(text).strip().upper()
+    if re.fullmatch(r"INTERNS?", s):
+        return 1
+    m = re.search(r"(?:PGY|R)[- ]?(\d)", s)
+    if m:
+        return int(m.group(1))
+    return None
+
+
 def detect_skip_rows(ws) -> set[int]:
     skip_rows = set()
 
@@ -137,6 +151,10 @@ class ExcelRotationLookup:
         self.ws = self.wb[self.sheet_name]
 
         self.skip_rows = detect_skip_rows(self.ws)
+        self.separator_pgy_labels: dict[int, Optional[int]] = {
+            r: _parse_pgy_label(self.ws.cell(row=r, column=1).value)
+            for r in self.skip_rows
+        }
         self.blocks = load_blocks(self.xlsx_path, self.sheet_name, academic_year_start=self.academic_year_start)
 
         self.resident_row: dict[str, int] = {}

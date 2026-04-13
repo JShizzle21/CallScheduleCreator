@@ -1,20 +1,28 @@
 from __future__ import annotations
 
+import bisect
+import concurrent.futures
 import random
 import time
 from datetime import date, datetime, timedelta
+from functools import partial
 from typing import Dict, List, Tuple, Optional
 
 from config import CONFIG
 from excel_reader import ExcelRotationLookup
 from exports import write_call_totals_xlsx, write_call_schedule_xlsx, write_audit
-from loader import load_residents, load_no_call_days, load_holidays, load_rotation_rules
+from loader import (
+    load_residents, load_no_call_days, load_holidays, load_rotation_rules,
+    load_clinic_days, load_completed_calls,
+)
 from validation import validate_rotations_against_rules, validate_no_call_days, audit_schedule
 
 DATA_DIR = CONFIG.get("DATA_DIR", "data")
 OUTPUT_DIR = CONFIG.get("OUTPUT_DIR", "output")
 FLOW_XLSX = CONFIG.get("FLOW_XLSX", "data/flow.xlsx")
 SHEET_NAME = CONFIG.get("SHEET_NAME", "master_block_calendar")
+CLINIC_DAYS_XLSX = CONFIG.get("CLINIC_DAYS_XLSX", "data/clinic_days.xlsx")
+COMPLETED_CALLS_XLSX = CONFIG.get("COMPLETED_CALLS_XLSX", "")
 
 POST_CALL_DAYS = CONFIG.get("POST_CALL_DAYS")
 SIMULATION_RUNS = CONFIG.get("SIMULATION_RUNS")
@@ -31,6 +39,7 @@ FAIRNESS_GAP_WEIGHT = CONFIG.get("FAIRNESS_GAP_WEIGHT")
 SPACING_WEIGHT = CONFIG.get("SPACING_WEIGHT")
 AVOID_WEIGHT = CONFIG.get("AVOID_WEIGHT")
 YEAR_BIAS_WEIGHT = CONFIG.get("YEAR_BIAS_WEIGHT")
+FUTURE_AVAIL_WEIGHT = CONFIG.get("FUTURE_AVAIL_WEIGHT")
 
 
 ACADEMIC_DATE_START = datetime.strptime(ACADEMIC_DATE_START_STRING, "%Y-%m-%d").date()
@@ -42,6 +51,9 @@ FIRST_HALF_END = date(ACADEMIC_YEAR_START, 12, 31)
 SLOT_UPPER_WEEKDAY = "UPPER_WEEKDAY"
 SLOT_UPPER_WEEKEND = "UPPER_WEEKEND"
 SLOT_INTERN_WEEKEND = "INTERN_WEEKEND"
+SLOT_INTERN_WEEKDAY = "INTERN_WEEKDAY"
+
+INTERN_BLOCK1_WEEKDAY_CALLS = int(CONFIG.get("INTERN_BLOCK1_WEEKDAY_CALLS", 0))
 
 
 MONTE_CARLO_SCORE_ORDER = CONFIG.get(
@@ -110,9 +122,11 @@ def is_weekend(d: date) -> bool:
     return d.weekday() >= 5
 
 
-def required_slots(d: date) -> List[str]:
+def required_slots(d: date, block1_end: Optional[date] = None) -> List[str]:
     if is_weekend(d):
         return [SLOT_INTERN_WEEKEND, SLOT_UPPER_WEEKEND]
+    if INTERN_BLOCK1_WEEKDAY_CALLS and block1_end is not None and d <= block1_end:
+        return [SLOT_UPPER_WEEKDAY, SLOT_INTERN_WEEKDAY]
     return [SLOT_UPPER_WEEKDAY]
 
 
@@ -139,18 +153,22 @@ def _compute_weighted_score(
     spacing_value: int,
     avoid_value: int,
     year_value: float,
+    future_avail_value: float = 0.0,
 ) -> float:
     """Combine ranking components into a single scalar.
 
     Each raw component lives on a different scale (fairness_gap is an
-    unbounded int, spacing_value is {0,1,2}, avoid/year are already in
-    [0,1]). We normalize each to roughly [0, 1] so the *_WEIGHT constants
-    express genuine relative importance — otherwise fairness_gap dominates
-    every other component once it grows past ~2.
+    unbounded int, spacing_value is {0,1,2}, avoid/year/future_avail are
+    already in [0,1]). We normalize each to roughly [0, 1] so the *_WEIGHT
+    constants express genuine relative importance.
 
     fairness_gap is clipped at MAX_DIFF_SOFT: above that threshold the
     soft/hard lexicographic gates have already separated candidates, so
     losing resolution there is acceptable.
+
+    future_avail_value: fraction of remaining call-eligible days this resident
+    has vs. the pool maximum. Higher = more days remaining = can be deferred =
+    less preferred now. Defaults to 0.0 (no look-ahead contribution).
     """
     if MAX_DIFF_SOFT > 0:
         fairness_norm = min(fairness_gap, MAX_DIFF_SOFT) / MAX_DIFF_SOFT
@@ -164,6 +182,7 @@ def _compute_weighted_score(
         + SPACING_WEIGHT * spacing_norm
         + AVOID_WEIGHT * avoid_value
         + YEAR_BIAS_WEIGHT * year_value
+        + FUTURE_AVAIL_WEIGHT * future_avail_value
     )
 
 
@@ -180,12 +199,12 @@ def eligible_for_slot(
     eligible: List[Tuple[str, str, str]] = []
     reasons: Dict[str, int] = {}
 
-    names = intern_names if slot == SLOT_INTERN_WEEKEND else upper_names
+    names = intern_names if slot in (SLOT_INTERN_WEEKEND, SLOT_INTERN_WEEKDAY) else upper_names
     for name in names:
         data = residents[name]
         pgy = data["pgy"]
 
-        if slot == SLOT_INTERN_WEEKEND:
+        if slot in (SLOT_INTERN_WEEKEND, SLOT_INTERN_WEEKDAY):
             if pgy != 1:
                 reasons["pgy_mismatch"] = reasons.get("pgy_mismatch", 0) + 1
                 continue
@@ -194,8 +213,12 @@ def eligible_for_slot(
                 reasons["pgy_mismatch"] = reasons.get("pgy_mismatch", 0) + 1
                 continue
 
-        if d in no_call_days.get(name, {}):
-            reasons["no_call_day"] = reasons.get("no_call_day", 0) + 1
+        no_call_entry = no_call_days.get(name, {}).get(d)
+        if no_call_entry is not None:
+            # Use the stored reason so "pre_clinic_day" shows as a distinct
+            # bucket from a regular no-call day in the unassigned report.
+            reason_key = no_call_entry if no_call_entry else "no_call_day"
+            reasons[reason_key] = reasons.get(reason_key, 0) + 1
             continue
 
         if is_post_call(data, d):
@@ -227,18 +250,21 @@ def pick_best_candidate(
     d: date,
     slot: str,
     rng: random.Random,
+    future_eligible: Optional[Dict[str, list]] = None,
 ) -> Optional[Tuple[str, str, bool]]:
     if not eligible:
         return None
 
     if slot == SLOT_INTERN_WEEKEND:
         counter_key = "weekend_calls"
+    elif slot == SLOT_INTERN_WEEKDAY:
+        counter_key = "intern_calls"
     elif slot == SLOT_UPPER_WEEKEND:
         counter_key = "weekend_calls"
     else:
         counter_key = "weekday_calls"
 
-    if slot == SLOT_INTERN_WEEKEND:
+    if slot in (SLOT_INTERN_WEEKEND, SLOT_INTERN_WEEKDAY):
         pool = [n for n, r in residents.items() if r["pgy"] == 1]
     elif slot in (SLOT_UPPER_WEEKDAY, SLOT_UPPER_WEEKEND):
         pool = [n for n, r in residents.items() if r["pgy"] in (2, 3)]
@@ -256,13 +282,27 @@ def pick_best_candidate(
         return 0
 
     def year_bias(pgy: int) -> float:
-        if slot == SLOT_INTERN_WEEKEND:
+        if slot in (SLOT_INTERN_WEEKEND, SLOT_INTERN_WEEKDAY):
             return 0.0
         if pgy == 3:
             return prog
         elif pgy == 2:
             return 1 - prog
         return 0.0
+
+    # Precompute future availability for each eligible candidate.
+    # remaining = # dates after d in their precomputed eligible list (static constraints only).
+    # Normalize within this eligible pool so the component is always in [0, 1].
+    # Higher remaining → more deferrable → higher score → less preferred now.
+    if future_eligible is not None:
+        future_remaining = {
+            name: len(future_eligible.get(name, [])) - bisect.bisect(future_eligible.get(name, []), d)
+            for name, _, _ in eligible
+        }
+        max_future_remaining = max(future_remaining.values(), default=0)
+    else:
+        future_remaining = {}
+        max_future_remaining = 0
 
     ranked_candidates = []
 
@@ -279,11 +319,17 @@ def pick_best_candidate(
         avoid_value = 1 if pref == "AVOID" else 0
         year_value = year_bias(pgy)
 
+        if max_future_remaining > 0:
+            future_avail_value = future_remaining.get(name, 0) / max_future_remaining
+        else:
+            future_avail_value = 0.0
+
         weighted_score = _compute_weighted_score(
             fairness_gap=fairness_gap,
             spacing_value=spacing_value,
             avoid_value=avoid_value,
             year_value=year_value,
+            future_avail_value=future_avail_value,
         )
 
         rank_components = {
@@ -319,35 +365,235 @@ def apply_assignment(residents: Dict[str, dict], name: str, slot: str, d: date) 
     else:
         data["weekday_calls"] += 1
 
-    if slot == SLOT_INTERN_WEEKEND:
+    if slot in (SLOT_INTERN_WEEKEND, SLOT_INTERN_WEEKDAY):
         data["intern_calls"] += 1
     else:
         data["upper_calls"] += 1
 
 
-def generate_schedule_once(seed=None):
-    rng = random.Random(seed)
-    tiebreaker_count = 0
+def _undo_assignment(residents: Dict[str, dict], name: str, slot: str, d: date) -> None:
+    """Mirror of apply_assignment — remove one call and decrement all counters."""
+    data = residents[name]
+    data["assigned_dates"].remove(d)  # list.remove: O(n) but safe (each day assigned once)
 
-    lookup = ExcelRotationLookup(FLOW_XLSX, SHEET_NAME, ACADEMIC_YEAR_START)
-    residents = load_residents(lookup)
-    rules = load_rotation_rules()
-    no_call = load_no_call_days()
-    holidays = load_holidays()
+    data["total_calls"] -= 1
 
-    validate_rotations_against_rules(lookup, residents, rules)
-    validate_no_call_days(no_call, residents)
+    if d <= FIRST_HALF_END:
+        data["Jul_Dec_calls"] -= 1
+    else:
+        data["Jan_Jun_calls"] -= 1
+
+    if is_weekend(d):
+        data["weekend_calls"] -= 1
+    else:
+        data["weekday_calls"] -= 1
+
+    if slot in (SLOT_INTERN_WEEKEND, SLOT_INTERN_WEEKDAY):
+        data["intern_calls"] -= 1
+    else:
+        data["upper_calls"] -= 1
+
+
+def local_swap_pass(
+    schedule_rows: list,
+    residents: Dict[str, dict],
+    lookup,
+    rules: Dict[Tuple[str, int], str],
+    no_call: Dict[str, dict],
+    max_iterations: int = 10,
+) -> int:
+    """Post-generation fairness repair: replace overscheduled residents with
+    underscheduled ones on days where both are eligible.
+
+    A swap is accepted when the candidate has at least 2 fewer calls in the
+    relevant counter (weekend_calls / weekday_calls) than the assigned resident.
+    The gap-of-2 requirement prevents oscillation across passes.
+
+    Returns the total number of swaps made across all iterations.
+    """
+    # Build index: (date_str, slot) → row position for O(1) lookup.
+    # COMPLETED rows are historical ground-truth — never swap them.
+    row_index: Dict[Tuple[str, str], int] = {}
+    for i, row in enumerate(schedule_rows):
+        if row["resident"] and row.get("note") != "COMPLETED":
+            row_index[(row["date"], row["slot"])] = i
 
     intern_names = [n for n, r in residents.items() if r["pgy"] == 1]
     upper_names = [n for n, r in residents.items() if r["pgy"] in (2, 3)]
 
-    schedule_rows = []
-    unassigned_rows = []
+    total_swaps = 0
 
-    d = ACADEMIC_DATE_START
+    for _iteration in range(max_iterations):
+        iteration_swaps = 0
+
+        for (date_str, slot), row_idx in sorted(row_index.items()):
+            row = schedule_rows[row_idx]
+            if not row["resident"]:
+                continue
+
+            d = date.fromisoformat(date_str)
+            assigned = row["resident"]
+
+            if slot == SLOT_INTERN_WEEKEND:
+                pool = intern_names
+                counter_key = "weekend_calls"
+            elif slot == SLOT_INTERN_WEEKDAY:
+                pool = intern_names
+                counter_key = "intern_calls"
+            elif slot == SLOT_UPPER_WEEKEND:
+                pool = upper_names
+                counter_key = "weekend_calls"
+            else:
+                pool = upper_names
+                counter_key = "weekday_calls"
+
+            assigned_count = residents[assigned][counter_key]
+
+            # Find the most underscheduled eligible candidate (gap ≥ 2 required)
+            best_candidate: Optional[Tuple[str, str]] = None
+            best_count = assigned_count - 1  # threshold: candidate must beat this
+
+            for candidate in pool:
+                if candidate == assigned:
+                    continue
+                cand_count = residents[candidate][counter_key]
+                if cand_count >= assigned_count - 1:
+                    continue  # gap < 2, skip to avoid oscillation
+                if cand_count >= best_count:
+                    continue  # not the most underscheduled so far
+
+                # Eligibility: no_call_day
+                if d in no_call.get(candidate, {}):
+                    continue
+
+                # Eligibility: post-call (candidate not assigned at d-1 or d-2)
+                if is_post_call(residents[candidate], d):
+                    continue
+
+                # Eligibility: rotation and preference
+                rotation = lookup.rotation_on_date(candidate, d)
+                if rotation is None:
+                    continue
+                pgy = residents[candidate]["pgy"]
+                pref = rules.get((rotation, pgy))
+                if pref is None or pref == "NO_CALL":
+                    continue
+
+                # Forward post-call spillover: adding d to candidate must not
+                # conflict with their existing assignments at d+1 or d+2
+                spillover = any(
+                    (d + timedelta(days=i)) in residents[candidate]["assigned_dates"]
+                    for i in range(1, POST_CALL_DAYS + 1)
+                )
+                if spillover:
+                    continue
+
+                best_count = cand_count
+                best_candidate = (candidate, rotation)
+
+            if best_candidate is None:
+                continue
+
+            candidate, rotation = best_candidate
+            _undo_assignment(residents, assigned, slot, d)
+            apply_assignment(residents, candidate, slot, d)
+
+            row["resident"] = candidate
+            row["pgy"] = residents[candidate]["pgy"]
+            row["rotation"] = rotation
+
+            iteration_swaps += 1
+
+        total_swaps += iteration_swaps
+        if iteration_swaps == 0:
+            break
+
+    return total_swaps
+
+
+def _merge_no_call(
+    base: Dict[str, dict],
+    overlay: Dict[str, dict],
+) -> Dict[str, dict]:
+    """Return a new dict that is base updated with overlay entries.
+    Neither input is mutated.
+    """
+    merged = {name: dict(dates) for name, dates in base.items()}
+    for name, dates in overlay.items():
+        merged.setdefault(name, {}).update(dates)
+    return merged
+
+
+def generate_schedule_once(seed=None, completed_assignments=None):
+    rng = random.Random(seed)
+    tiebreaker_count = 0
+
+    lookup = ExcelRotationLookup(FLOW_XLSX, SHEET_NAME, ACADEMIC_YEAR_START)
+    block1_end = lookup.blocks[0].end if (INTERN_BLOCK1_WEEKDAY_CALLS and lookup.blocks) else None
+    residents = load_residents(lookup)
+    rules = load_rotation_rules()
+    no_call_base = load_no_call_days()
+    clinic_pre_blocks = load_clinic_days(CLINIC_DAYS_XLSX)
+    # Merge clinic-derived pre-call blocks into no_call so the same eligibility
+    # path enforces both; the distinct reason string ("pre_clinic_day") is
+    # preserved so the unassigned report can distinguish the two sources.
+    no_call = _merge_no_call(no_call_base, clinic_pre_blocks)
+    holidays = load_holidays()
+
+    validate_rotations_against_rules(lookup, residents, rules)
+    validate_no_call_days(no_call, residents)  # validates merged dict (both sources)
+
+    intern_names = [n for n, r in residents.items() if r["pgy"] == 1]
+    upper_names = [n for n, r in residents.items() if r["pgy"] in (2, 3)]
+
+    # ── Partial year: seed residents with historical calls ────────────────────
+    schedule_rows: List[dict] = []
+    unassigned_rows: List[dict] = []
+
+    if completed_assignments:
+        for ca_date, ca_name, ca_slot in completed_assignments:
+            if ca_name not in residents:
+                raise ValueError(
+                    f"Completed call file references unknown resident '{ca_name}' "
+                    f"on {ca_date}. Check that names match the flow sheet exactly."
+                )
+            apply_assignment(residents, ca_name, ca_slot, ca_date)
+            schedule_rows.append({
+                "date": ca_date.isoformat(),
+                "day_of_week": ca_date.strftime("%a"),
+                "slot": ca_slot,
+                "resident": ca_name,
+                "pgy": residents[ca_name]["pgy"],
+                "rotation": lookup.rotation_on_date(ca_name, ca_date) or "",
+                "note": "COMPLETED",
+            })
+        restart_date = max(ca_date for ca_date, _, _ in completed_assignments) + timedelta(days=1)
+    else:
+        restart_date = ACADEMIC_DATE_START
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # Precompute sorted lists of future call-eligible dates per resident.
+    # Uses static constraints only (rotation preference + no_call_days, which
+    # now includes pre-clinic blocks); post-call exclusions are dynamic.
+    future_eligible: Dict[str, list] = {}
+    for name, data in residents.items():
+        pgy = data["pgy"]
+        dates = []
+        di = ACADEMIC_DATE_START
+        while di <= ACADEMIC_DATE_END:
+            if di not in holidays and di not in no_call.get(name, {}):
+                rotation = lookup.rotation_on_date(name, di)
+                if rotation is not None:
+                    pref = rules.get((rotation, pgy))
+                    if pref not in (None, "NO_CALL"):
+                        dates.append(di)
+            di += timedelta(days=1)
+        future_eligible[name] = dates  # ascending order — ready for bisect
+
+    d = restart_date
     while d <= ACADEMIC_DATE_END:
         if d in holidays:
-            for slot in required_slots(d):
+            for slot in required_slots(d, block1_end=block1_end):
                 schedule_rows.append({
                     "date": d.isoformat(),
                     "day_of_week": d.strftime("%a"),
@@ -366,11 +612,11 @@ def generate_schedule_once(seed=None):
             d += timedelta(days=1)
             continue
 
-        for slot in required_slots(d):
+        for slot in required_slots(d, block1_end=block1_end):
             eligible, reasons = eligible_for_slot(
                 lookup, residents, rules, no_call, d, slot, intern_names, upper_names
             )
-            picked = pick_best_candidate(residents, eligible, d, slot, rng)
+            picked = pick_best_candidate(residents, eligible, d, slot, rng, future_eligible)
 
             if picked is None:
                 schedule_rows.append({
@@ -405,6 +651,9 @@ def generate_schedule_once(seed=None):
 
         d += timedelta(days=1)
 
+    # Post-generation local swap pass: repair fairness imbalances the greedy missed.
+    swap_count = local_swap_pass(schedule_rows, residents, lookup, rules, no_call)
+
     audit_data = audit_schedule(
         schedule_rows=schedule_rows,
         residents=residents,
@@ -417,18 +666,25 @@ def generate_schedule_once(seed=None):
         tiebreaker_count=tiebreaker_count,
     )
 
+    audit_data["intern_block1_weekday_calls"] = bool(INTERN_BLOCK1_WEEKDAY_CALLS)
+    audit_data["block1_end"] = block1_end.isoformat() if block1_end else None
     audit_data["pick_candidate_rank_order"] = PICK_CANDIDATE_RANK_ORDER
     audit_data["pick_candidate_weights"] = {
         "FAIRNESS_GAP_WEIGHT": FAIRNESS_GAP_WEIGHT,
         "SPACING_WEIGHT": SPACING_WEIGHT,
         "AVOID_WEIGHT": AVOID_WEIGHT,
         "YEAR_BIAS_WEIGHT": YEAR_BIAS_WEIGHT,
+        "FUTURE_AVAIL_WEIGHT": FUTURE_AVAIL_WEIGHT,
     }
     audit_data["monte_carlo_score_order"] = MONTE_CARLO_SCORE_ORDER
+    audit_data["swap_improvements"] = swap_count
+    audit_data["restart_date"] = restart_date.isoformat() if restart_date != ACADEMIC_DATE_START else None
+    audit_data["completed_call_count"] = len(completed_assignments) if completed_assignments else 0
 
     return {
         "schedule_rows": schedule_rows,
         "residents": residents,
+        "rules": rules,
         "lookup": lookup,
         "holidays": holidays,
         "no_call": no_call,
@@ -458,29 +714,31 @@ def monte_carlo_score(result):
 def format_monte_carlo_score(score):
     return ", ".join(f"{key}={value}" for key, value in zip(MONTE_CARLO_SCORE_ORDER, score))
 
-def run_simulation(num_runs=50):
+def _score_seed(seed: int, completed_assignments=None) -> tuple:
+    """Worker function: returns (seed, score_tuple). Must be top-level for pickling."""
+    result = generate_schedule_once(seed=seed, completed_assignments=completed_assignments)
+    return seed, monte_carlo_score(result)
+
+
+def run_simulation(num_runs=50, completed_assignments=None):
     start = time.time()
-    best_result = None
-    best_score = None
+    seed_scores: list[tuple[int, tuple]] = []
 
-    for seed in range(num_runs):
-        result = generate_schedule_once(seed=seed)
-        score = monte_carlo_score(result)
+    worker = partial(_score_seed, completed_assignments=completed_assignments or [])
 
-        print(f"Run {seed + 1}/{num_runs} | seed={seed} | {format_monte_carlo_score(score)}")
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        futures = {executor.submit(worker, seed): seed for seed in range(num_runs)}
+        for future in concurrent.futures.as_completed(futures):
+            seed, score = future.result()
+            seed_scores.append((seed, score))
+            print(f"[{len(seed_scores)}/{num_runs}] seed={seed} | {format_monte_carlo_score(score)}")
 
-        if best_score is None or score < best_score:
-            best_score = score
-            best_result = result
-
-
-    best_seed = best_result["audit_data"]["seed"]
+    best_seed, best_score = min(seed_scores, key=lambda x: x[1])
+    best_result = generate_schedule_once(seed=best_seed, completed_assignments=completed_assignments)
 
     end = time.time()
     print(f"\nSimulation completed in {end - start:.2f} seconds")
-    print("Best run selected:")
-    print(f"Seed: {best_seed}")
-    print(f"Score: {best_score}\n")
+    print(f"Best run: seed={best_seed} | {format_monte_carlo_score(best_score)}\n")
 
     return best_result
 
@@ -520,7 +778,22 @@ def export_result(result):
 
 
 if __name__ == "__main__":
-    best_result = run_simulation(num_runs=SIMULATION_RUNS)
-    export_result(best_result)
+    # When Block 1 intern weekday calls are enabled, we need the block 1 end date
+    # so load_completed_calls can correctly classify weekday intern entries.
+    if INTERN_BLOCK1_WEEKDAY_CALLS and COMPLETED_CALLS_XLSX:
+        _lu = ExcelRotationLookup(FLOW_XLSX, SHEET_NAME, ACADEMIC_YEAR_START)
+        _block1_end = _lu.blocks[0].end if _lu.blocks else None
+    else:
+        _block1_end = None
+    completed = load_completed_calls(COMPLETED_CALLS_XLSX, block1_end=_block1_end) if COMPLETED_CALLS_XLSX else []
 
-    #export_result(generate_schedule_once(seed=87))
+    if completed:
+        from datetime import timedelta as _td
+        restart = max(d for d, _, _ in completed) + _td(days=1)
+        print(f"Partial year mode: {len(completed)} completed call(s) loaded.")
+        print(f"Generating schedule from {restart} onward.\n")
+    else:
+        print("Full year mode: generating schedule from scratch.\n")
+
+    best_result = run_simulation(num_runs=SIMULATION_RUNS, completed_assignments=completed)
+    export_result(best_result)

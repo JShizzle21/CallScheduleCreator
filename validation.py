@@ -8,6 +8,7 @@ from config import CONFIG
 DATA_DIR = CONFIG.get("DATA_DIR", "data")
 OUTPUT_DIR = CONFIG.get("OUTPUT_DIR", "output")
 POST_CALL_DAYS = CONFIG.get("POST_CALL_DAYS", 2)
+INTERN_BLOCK1_WEEKDAY_CALLS = int(CONFIG.get("INTERN_BLOCK1_WEEKDAY_CALLS", 0))
 ACADEMIC_DATE_START_STRING = CONFIG.get("ACADEMIC_DATE_START_STRING", "2026-07-01")
 ACADEMIC_DATE_END_STRING = CONFIG.get("ACADEMIC_DATE_END_STRING", "2027-06-30")
 ACADEMIC_DATE_START = datetime.strptime(ACADEMIC_DATE_START_STRING, "%Y-%m-%d").date()
@@ -107,6 +108,8 @@ def audit_schedule(
         if resident:
             by_resident[resident].append((d, slot))
 
+    block1_end = lookup.blocks[0].end if (INTERN_BLOCK1_WEEKDAY_CALLS and lookup.blocks) else None
+
     d = ACADEMIC_DATE_START
     while d <= ACADEMIC_DATE_END:
         if d in holidays:
@@ -117,6 +120,7 @@ def audit_schedule(
 
         upper_count = sum(1 for r in rows if r["slot"] in ("UPPER_WEEKDAY", "UPPER_WEEKEND") and r.get("resident"))
         intern_count = sum(1 for r in rows if r["slot"] == "INTERN_WEEKEND" and r.get("resident"))
+        intern_weekday_count = sum(1 for r in rows if r["slot"] == "INTERN_WEEKDAY" and r.get("resident"))
 
         if is_weekend(d):
             if upper_count != 1:
@@ -126,8 +130,15 @@ def audit_schedule(
         else:
             if upper_count != 1:
                 errors.append(f"{d}: expected 1 upper weekday assignment, found {upper_count}")
-            if intern_count != 0:
-                errors.append(f"{d}: weekday should not have intern assignment, found {intern_count}")
+            if block1_end is not None and d <= block1_end:
+                if intern_weekday_count != 1:
+                    errors.append(f"{d}: expected 1 intern weekday assignment (Block 1), found {intern_weekday_count}")
+            else:
+                if intern_count != 0 or intern_weekday_count != 0:
+                    errors.append(
+                        f"{d}: weekday should not have intern assignment, "
+                        f"found {intern_count + intern_weekday_count}"
+                    )
 
         d += timedelta(days=1)
 
@@ -151,10 +162,16 @@ def audit_schedule(
                 errors.append(f"{d}: {resident} assigned more than once on same day")
             assigned_today.add(resident)
 
-            if slot == "INTERN_WEEKEND" and pgy != 1:
-                errors.append(f"{d}: {resident} assigned to intern weekend slot but is PGY{pgy}")
+            if slot in ("INTERN_WEEKEND", "INTERN_WEEKDAY") and pgy != 1:
+                errors.append(f"{d}: {resident} assigned to intern slot ({slot}) but is PGY{pgy}")
             if slot in ("UPPER_WEEKDAY", "UPPER_WEEKEND") and pgy == 1:
                 errors.append(f"{d}: {resident} assigned to upper slot but is PGY1")
+
+            # COMPLETED rows are accepted as ground truth — skip constraint
+            # checks that the user may have manually overridden.
+            is_completed = row.get("note") == "COMPLETED"
+            if is_completed:
+                continue
 
             resident_days = no_call_days.get(resident, {})
             if d in resident_days:
@@ -230,6 +247,9 @@ def audit_schedule(
 
     for d, rows in by_date.items():
         for row in rows:
+            if row.get("note") == "COMPLETED":
+                continue
+
             resident = (row.get("resident") or "").strip()
             if not resident:
                 continue
