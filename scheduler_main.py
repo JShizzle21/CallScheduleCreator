@@ -255,9 +255,7 @@ def pick_best_candidate(
     if not eligible:
         return None
 
-    if slot == SLOT_INTERN_WEEKEND:
-        counter_key = "weekend_calls"
-    elif slot == SLOT_INTERN_WEEKDAY:
+    if slot in (SLOT_INTERN_WEEKEND, SLOT_INTERN_WEEKDAY):
         counter_key = "intern_calls"
     elif slot == SLOT_UPPER_WEEKEND:
         counter_key = "weekend_calls"
@@ -434,10 +432,7 @@ def local_swap_pass(
             d = date.fromisoformat(date_str)
             assigned = row["resident"]
 
-            if slot == SLOT_INTERN_WEEKEND:
-                pool = intern_names
-                counter_key = "weekend_calls"
-            elif slot == SLOT_INTERN_WEEKDAY:
+            if slot in (SLOT_INTERN_WEEKEND, SLOT_INTERN_WEEKDAY):
                 pool = intern_names
                 counter_key = "intern_calls"
             elif slot == SLOT_UPPER_WEEKEND:

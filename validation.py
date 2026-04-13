@@ -222,7 +222,7 @@ def audit_schedule(
 
     upper_weekday_counts = [r["weekday_calls"] for r in uppers]
     upper_weekend_counts = [r["weekend_calls"] for r in uppers]
-    intern_weekend_counts = [r["weekend_calls"] for r in interns]
+    intern_weekend_counts = [r["intern_calls"] for r in interns]
     upper_total_counts = [r["total_calls"] for r in uppers]
 
     fairness_summary = {
