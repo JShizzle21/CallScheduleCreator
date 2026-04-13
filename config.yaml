@@ -19,7 +19,7 @@ ROTATION_RULES_XLSX: "data/rotation_rules.xlsx"
 SHEET_NAME: "master_block_calendar"
 
 # Number of times to run the simulation in order to get the best Monte Carlo score
-SIMULATION_RUNS: 1
+SIMULATION_RUNS: 1000
 
 # Name in the flow Excel document
 NIGHT_FLOAT_ROTATION_NAME: "NF"
@@ -72,10 +72,10 @@ MAX_DIFF_HARD: 4
 # These weights are used inside the weighted score after the hard/soft
 # fairness thresholds are applied lexicographically.
 
-FAIRNESS_GAP_WEIGHT: 1.0
-SPACING_WEIGHT: 0.75
-AVOID_WEIGHT: 1.25
-YEAR_BIAS_WEIGHT: 1.0
+FAIRNESS_GAP_WEIGHT: 3.0
+SPACING_WEIGHT: 1.0
+AVOID_WEIGHT: 0.25
+YEAR_BIAS_WEIGHT: 1.5
 
 # ---------------------------------------
 # Monte Carlo schedule ranking priority
