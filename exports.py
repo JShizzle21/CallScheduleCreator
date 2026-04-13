@@ -114,20 +114,27 @@ def write_call_schedule_xlsx(
     ws.freeze_panes = "A2"
 
     by_date = {}
+    completed_dates: set = set()
     for r in schedule_rows:
         d = date.fromisoformat(r["date"])
         slot = r["slot"]
         name = (r.get("resident") or "").strip()
 
-        rec = by_date.setdefault(d, {"upper": "", "intern_weekend": ""})
+        rec = by_date.setdefault(d, {"upper": "", "intern_weekend": "", "intern_weekday": ""})
         if slot in ("UPPER_WEEKDAY", "UPPER_WEEKEND"):
             rec["upper"] = name
         elif slot == "INTERN_WEEKEND":
             rec["intern_weekend"] = name
+        elif slot == "INTERN_WEEKDAY":
+            rec["intern_weekday"] = name
+
+        if r.get("note") == "COMPLETED":
+            completed_dates.add(d)
 
     weekend_fill = PatternFill("solid", fgColor="FFF2CC")
     holiday_fill = PatternFill("solid", fgColor="F8CBAD")
     block_fill = PatternFill("solid", fgColor="D9EAD3")
+    completed_fill = PatternFill("solid", fgColor="EBEBEB")  # light grey for completed rows
     thick_top = Border(top=Side(style="medium"))
 
     date_to_block_num = {}
@@ -146,12 +153,17 @@ def write_call_schedule_xlsx(
         if d.weekday() >= 5:
             intern_val = by_date[d]["intern_weekend"] or "0"
         else:
-            nf_interns = []
-            for name in intern_names:
-                rot = lookup.rotation_on_date(name, d)
-                if rot == NIGHT_FLOAT_ROTATION_NAME:
-                    nf_interns.append(name)
-            intern_val = ", ".join(sorted(nf_interns)) if nf_interns else "0"
+            intern_weekday = by_date[d].get("intern_weekday", "")
+            if intern_weekday:
+                # Block 1 weekday intern call — show the assigned resident
+                intern_val = intern_weekday
+            else:
+                nf_interns = []
+                for name in intern_names:
+                    rot = lookup.rotation_on_date(name, d)
+                    if rot == NIGHT_FLOAT_ROTATION_NAME:
+                        nf_interns.append(name)
+                intern_val = ", ".join(sorted(nf_interns)) if nf_interns else "0"
 
         no_call_entries = []
         for name, days in no_call_days.items():
@@ -169,6 +181,8 @@ def write_call_schedule_xlsx(
 
         if d in holidays:
             fill = holiday_fill
+        elif d in completed_dates:
+            fill = completed_fill
         elif d.weekday() >= 5:
             fill = weekend_fill
         else:
@@ -177,6 +191,12 @@ def write_call_schedule_xlsx(
         if fill:
             for col in range(1, 7):
                 ws.cell(row=row_i, column=col).fill = fill
+
+        # Italicise name cells on completed rows so they read as "locked"
+        if d in completed_dates:
+            italic = Font(italic=True, color="808080")
+            for col in (4, 5):  # Upper level, Intern
+                ws.cell(row=row_i, column=col).font = italic
 
         if d in block_start_dates:
             for col in range(1, 6):
