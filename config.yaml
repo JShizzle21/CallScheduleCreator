@@ -51,6 +51,13 @@ NIGHT_FLOAT_ROTATION_NAME: "NF"
 MIN_SPACING_DAYS_STRONG: 7
 MIN_SPACING_DAYS_MILD: 14
 
+# Rolling-window hard cap: prevents "every-3-days for a month" burst patterns.
+# After MAX_CALLS_IN_WINDOW calls in any ROLLING_WINDOW_DAYS window, the resident
+# is ineligible until the oldest call rolls out of the window (≈ full week break).
+# Set MAX_CALLS_IN_WINDOW to 0 to disable.
+MAX_CALLS_IN_WINDOW: 3
+ROLLING_WINDOW_DAYS: 14
+
 #Multiplier values
 #SPACING_WEIGHT: 2.0
 

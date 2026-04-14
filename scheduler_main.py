@@ -32,6 +32,9 @@ ACADEMIC_DATE_END_STRING = CONFIG.get("ACADEMIC_DATE_END_STRING")
 MIN_SPACING_DAYS_STRONG = CONFIG.get("MIN_SPACING_DAYS_STRONG")
 MIN_SPACING_DAYS_MILD = CONFIG.get("MIN_SPACING_DAYS_MILD")
 
+MAX_CALLS_IN_WINDOW = int(CONFIG.get("MAX_CALLS_IN_WINDOW", 0))
+ROLLING_WINDOW_DAYS = int(CONFIG.get("ROLLING_WINDOW_DAYS", 14))
+
 MAX_DIFF_SOFT = CONFIG.get("MAX_DIFF_SOFT")
 MAX_DIFF_HARD = CONFIG.get("MAX_DIFF_HARD")
 
@@ -148,6 +151,32 @@ def is_post_call(resident_data, d):
     return False
 
 
+def would_exceed_window_cap(assigned_dates, d: date) -> bool:
+    """Return True if adding d to assigned_dates would create any rolling
+    window of ROLLING_WINDOW_DAYS consecutive days containing more than
+    MAX_CALLS_IN_WINDOW call assignments.
+
+    Checks every window that contains d (there are ROLLING_WINDOW_DAYS such
+    windows, with start dates ranging from d-(W-1) to d). If any such window
+    would end up with more than the cap, return True.
+
+    Set MAX_CALLS_IN_WINDOW to 0 in config.yaml to disable this check.
+    """
+    if MAX_CALLS_IN_WINDOW <= 0 or ROLLING_WINDOW_DAYS <= 0:
+        return False
+
+    already_present = d in assigned_dates
+    for offset in range(ROLLING_WINDOW_DAYS):
+        start = d - timedelta(days=ROLLING_WINDOW_DAYS - 1 - offset)
+        end = start + timedelta(days=ROLLING_WINDOW_DAYS - 1)
+        count = sum(1 for ad in assigned_dates if start <= ad <= end)
+        if not already_present:
+            count += 1
+        if count > MAX_CALLS_IN_WINDOW:
+            return True
+    return False
+
+
 def _compute_weighted_score(
     fairness_gap: int,
     spacing_value: int,
@@ -223,6 +252,10 @@ def eligible_for_slot(
 
         if is_post_call(data, d):
             reasons["post_call"] = reasons.get("post_call", 0) + 1
+            continue
+
+        if would_exceed_window_cap(data["assigned_dates"], d):
+            reasons["window_cap"] = reasons.get("window_cap", 0) + 1
             continue
 
         rotation = lookup.rotation_on_date(name, d)
@@ -481,6 +514,11 @@ def local_swap_pass(
                     for i in range(1, POST_CALL_DAYS + 1)
                 )
                 if spillover:
+                    continue
+
+                # Rolling-window cap: adding d must not push the candidate
+                # over MAX_CALLS_IN_WINDOW in any ROLLING_WINDOW_DAYS window
+                if would_exceed_window_cap(residents[candidate]["assigned_dates"], d):
                     continue
 
                 best_count = cand_count
