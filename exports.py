@@ -58,8 +58,7 @@ def write_call_totals_xlsx(residents: dict, path: str) -> None:
     pgy2_fill = PatternFill("solid", fgColor="CFE2F3")
     pgy3_fill = PatternFill("solid", fgColor="F4CCCC")
 
-    for name in sorted(residents.keys()):
-        r = residents[name]
+    for name, r in residents.items():
         ws.append([
             name,
             r["pgy"],
