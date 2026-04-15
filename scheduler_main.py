@@ -231,20 +231,29 @@ def _precompute_expected_calls(
     residents: Dict[str, dict],
     rules: Dict[Tuple[str, int], str],
     no_call_days: Dict[str, dict],
-    holidays: Dict[date, str],
+    holidays: Dict[date, dict],
     intern_names,
     upper_names,
     block1_end: Optional[date],
+    holiday_assignments: Optional[Dict[Tuple[date, str], str]] = None,
 ) -> Dict[str, Dict[str, Dict[date, float]]]:
     """Per-resident cumulative expected-call counts for each counter type.
 
-    For every (non-holiday) day, each required slot contributes 1/|pool|
+    For every non-holiday day, each required slot contributes 1/|pool|
     to each statically-eligible resident's counter, where pool is the
-    static-eligibility pool for that slot. The returned structure gives
-    the cumulative expected value **as of the start of day d** (i.e.,
-    before day-d assignments are made), so it aligns directly with
-    residents[name][counter_key] inside pick_best_candidate.
+    static-eligibility pool for that slot.
+
+    For holiday days with a manual assignment, the assigned resident
+    receives +1.0 to the relevant counter (and only them). This keeps
+    pace_value neutral on holiday days — their actual counter is also +1
+    via apply_assignment — so pacing neither rewards nor penalises the
+    holiday-assigned resident after the fact.
+
+    The returned structure gives the cumulative expected value **as of the
+    start of day d** (i.e., before day-d assignments are made), so it aligns
+    directly with residents[name][counter_key] inside pick_best_candidate.
     """
+    holiday_assignments = holiday_assignments or {}
     counter_keys = ("weekday_calls", "weekend_calls", "intern_calls")
     expected_cum: Dict[str, Dict[str, Dict[date, float]]] = {
         name: {ck: {} for ck in counter_keys} for name in residents
@@ -262,7 +271,16 @@ def _precompute_expected_calls(
             for ck in counter_keys:
                 expected_cum[name][ck][d] = running[name][ck]
 
-        if d not in holidays:
+        if d in holidays:
+            # Manual holiday assignment: +1 expected for the named resident on
+            # the counter that apply_assignment bumped. Other pool members get
+            # nothing (they're not competing for this day).
+            for slot in (SLOT_UPPER_WEEKDAY, SLOT_UPPER_WEEKEND,
+                         SLOT_INTERN_WEEKDAY, SLOT_INTERN_WEEKEND):
+                name = holiday_assignments.get((d, slot))
+                if name is not None:
+                    running[name][_SLOT_COUNTER_KEY[slot]] += 1.0
+        else:
             for slot in required_slots(d, block1_end=block1_end):
                 ck = _SLOT_COUNTER_KEY[slot]
                 pool = _static_pool_for_slot(
@@ -284,7 +302,7 @@ def _precompute_eligible_dates(
     residents: Dict[str, dict],
     rules: Dict[Tuple[str, int], str],
     no_call_days: Dict[str, dict],
-    holidays: Dict[date, str],
+    holidays: Dict[date, dict],
     block1_end: Optional[date],
 ) -> Dict[str, list]:
     """Per-resident sorted list of dates on which the resident is statically
@@ -620,9 +638,11 @@ def local_swap_pass(
     """
     # Build index: (date_str, slot) → row position for O(1) lookup.
     # COMPLETED rows are historical ground-truth — never swap them.
+    # HOLIDAY rows are manual overrides — never swap them either.
     row_index: Dict[Tuple[str, str], int] = {}
     for i, row in enumerate(schedule_rows):
-        if row["resident"] and row.get("note") != "COMPLETED":
+        note = row.get("note") or ""
+        if row["resident"] and note != "COMPLETED" and not note.startswith("HOLIDAY:"):
             row_index[(row["date"], row["slot"])] = i
 
     intern_names = [n for n, r in residents.items() if r["pgy"] == 1]
@@ -720,6 +740,128 @@ def local_swap_pass(
     return total_swaps
 
 
+def _pre_apply_holidays(
+    holidays: Dict[date, dict],
+    residents: Dict[str, dict],
+    lookup,
+    block1_end: Optional[date],
+    skip_dates: Optional[set] = None,
+) -> Tuple[List[dict], List[dict], Dict[Tuple[date, str], str]]:
+    """Pre-apply manual holiday assignments before the main day loop.
+
+    For each holiday date, reads the `upper` and `intern` names from
+    holidays.xlsx and:
+      - Validates the name exists and has the correct PGY (errors if not).
+      - Calls apply_assignment() so every counter (total_calls, weekday/weekend,
+        intern/upper, Jul_Dec/Jan_Jun, assigned_dates) is bumped. This makes
+        holiday calls participate in fairness, pacing, and post-call logic for
+        every subsequent day.
+      - Emits a schedule_rows entry with note='HOLIDAY: <name>' so the writer
+        can render the name and apply the holiday colour.
+      - For blank upper/intern cells, emits an empty schedule row + an
+        unassigned_rows entry so the audit still flags them (same as today's
+        behaviour for holidays with no staffing).
+
+    Slot inference mirrors load_completed_calls:
+      - Weekend → UPPER_WEEKEND / INTERN_WEEKEND.
+      - Weekday → UPPER_WEEKDAY / INTERN_WEEKDAY (INTERN_WEEKDAY is used on
+        any weekday holiday, including outside Block 1, because the writer
+        already prefers the assigned intern over the Night Float display).
+
+    Conflicts (no_call_days, NO_CALL rotation, adjacent-holiday post-call) are
+    intentionally NOT rejected — manual holiday assignments win per user
+    policy. The audit may still flag them for human review.
+
+    Parameters:
+      skip_dates: dates already handled elsewhere (e.g. by completed_calls).
+        Holiday rows for these dates are skipped entirely to avoid
+        double-counting.
+
+    Returns:
+      schedule_rows, unassigned_rows, and a map
+      (date, slot) → resident_name of applied holiday assignments — used by
+      _precompute_expected_calls to keep pace_value neutral on holiday days.
+    """
+    skip_dates = skip_dates or set()
+    schedule_rows: List[dict] = []
+    unassigned_rows: List[dict] = []
+    holiday_assignments: Dict[Tuple[date, str], str] = {}
+
+    for d in sorted(holidays.keys()):
+        if d in skip_dates:
+            continue
+
+        info = holidays[d]
+        display_name = info["name"]
+        upper_name = info.get("upper")
+        intern_name = info.get("intern")
+
+        is_wknd = is_weekend(d)
+        upper_slot = SLOT_UPPER_WEEKEND if is_wknd else SLOT_UPPER_WEEKDAY
+        intern_slot = SLOT_INTERN_WEEKEND if is_wknd else SLOT_INTERN_WEEKDAY
+
+        for slot, name in ((upper_slot, upper_name), (intern_slot, intern_name)):
+            if name:
+                if name not in residents:
+                    raise ValueError(
+                        f"Holiday file references unknown resident '{name}' on "
+                        f"{d} ({display_name}). Check that names match the flow "
+                        f"sheet exactly."
+                    )
+                pgy = residents[name]["pgy"]
+                if slot in (SLOT_INTERN_WEEKEND, SLOT_INTERN_WEEKDAY) and pgy != 1:
+                    raise ValueError(
+                        f"Holiday file assigns '{name}' (PGY{pgy}) to the intern "
+                        f"slot on {d} ({display_name}). Interns must be PGY1."
+                    )
+                if slot in (SLOT_UPPER_WEEKDAY, SLOT_UPPER_WEEKEND) and pgy == 1:
+                    raise ValueError(
+                        f"Holiday file assigns '{name}' (PGY1) to the upper slot "
+                        f"on {d} ({display_name}). Upper residents must be PGY2 or PGY3."
+                    )
+
+                apply_assignment(residents, name, slot, d)
+                holiday_assignments[(d, slot)] = name
+                schedule_rows.append({
+                    "date": d.isoformat(),
+                    "day_of_week": d.strftime("%a"),
+                    "slot": slot,
+                    "resident": name,
+                    "pgy": pgy,
+                    "rotation": lookup.rotation_on_date(name, d) or "",
+                    "note": f"HOLIDAY: {display_name}",
+                })
+            else:
+                # Blank cell for this slot — leave unassigned so the audit
+                # flags it (matches today's behaviour when holidays.xlsx has
+                # no names). Non-Block-1 weekday intern slot is skipped
+                # silently because that slot doesn't normally exist.
+                is_optional_intern_slot = (
+                    slot == SLOT_INTERN_WEEKDAY
+                    and not (INTERN_BLOCK1_WEEKDAY_CALLS and block1_end is not None and d <= block1_end)
+                )
+                if is_optional_intern_slot:
+                    continue
+
+                schedule_rows.append({
+                    "date": d.isoformat(),
+                    "day_of_week": d.strftime("%a"),
+                    "slot": slot,
+                    "resident": "",
+                    "pgy": "",
+                    "rotation": "",
+                    "note": f"HOLIDAY: {display_name}",
+                })
+                unassigned_rows.append({
+                    "date": d.isoformat(),
+                    "slot": slot,
+                    "holiday": display_name,
+                    "reasons": "holiday_manual_assignment",
+                })
+
+    return schedule_rows, unassigned_rows, holiday_assignments
+
+
 def _merge_no_call(
     base: Dict[str, dict],
     overlay: Dict[str, dict],
@@ -759,6 +901,7 @@ def generate_schedule_once(seed=None, completed_assignments=None):
     schedule_rows: List[dict] = []
     unassigned_rows: List[dict] = []
 
+    completed_dates: set = set()
     if completed_assignments:
         for ca_date, ca_name, ca_slot in completed_assignments:
             if ca_name not in residents:
@@ -776,9 +919,26 @@ def generate_schedule_once(seed=None, completed_assignments=None):
                 "rotation": lookup.rotation_on_date(ca_name, ca_date) or "",
                 "note": "COMPLETED",
             })
+            completed_dates.add(ca_date)
         restart_date = max(ca_date for ca_date, _, _ in completed_assignments) + timedelta(days=1)
     else:
         restart_date = ACADEMIC_DATE_START
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # ── Pre-apply manually-assigned holiday calls ────────────────────────────
+    # Each row in holidays.xlsx may name an upper and/or intern resident.
+    # Those names are applied here, BEFORE the main day loop, so their
+    # counters are bumped and their post-call days correctly block them from
+    # subsequent assignments. Completed dates win to avoid double-counting.
+    holiday_rows, holiday_unassigned, holiday_assignments = _pre_apply_holidays(
+        holidays=holidays,
+        residents=residents,
+        lookup=lookup,
+        block1_end=block1_end,
+        skip_dates=completed_dates,
+    )
+    schedule_rows.extend(holiday_rows)
+    unassigned_rows.extend(holiday_unassigned)
     # ─────────────────────────────────────────────────────────────────────────
 
     # Precompute cumulative expected-call counts per (resident, counter_key, date)
@@ -795,6 +955,7 @@ def generate_schedule_once(seed=None, completed_assignments=None):
         intern_names=intern_names,
         upper_names=upper_names,
         block1_end=block1_end,
+        holiday_assignments=holiday_assignments,
     )
 
     # Per-resident sorted list of statically-eligible dates — used for the
@@ -810,23 +971,9 @@ def generate_schedule_once(seed=None, completed_assignments=None):
 
     d = restart_date
     while d <= ACADEMIC_DATE_END:
+        # Holiday days are handled by _pre_apply_holidays above. Counters are
+        # already bumped and schedule_rows already populated; just advance.
         if d in holidays:
-            for slot in required_slots(d, block1_end=block1_end):
-                schedule_rows.append({
-                    "date": d.isoformat(),
-                    "day_of_week": d.strftime("%a"),
-                    "slot": slot,
-                    "resident": "",
-                    "pgy": "",
-                    "rotation": "",
-                    "note": f"HOLIDAY: {holidays[d]}",
-                })
-                unassigned_rows.append({
-                    "date": d.isoformat(),
-                    "slot": slot,
-                    "holiday": holidays[d],
-                    "reasons": "holiday_manual_assignment",
-                })
             d += timedelta(days=1)
             continue
 

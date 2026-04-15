@@ -125,12 +125,29 @@ def load_no_call_days(path: str = NO_CALL_DAYS_XLSX) -> Dict[str, dict]:
     return out
 
 
-def load_holidays(path: str = HOLIDAYS_XLSX) -> Dict[date, str]:
-    out: Dict[date, str] = {}
+def load_holidays(path: str = HOLIDAYS_XLSX) -> Dict[date, dict]:
+    """Load holiday dates plus optional manually-assigned residents.
+
+    Columns:
+      - ``date`` (required): the holiday date.
+      - ``name`` (optional): display name (e.g. "Christmas"); defaults to "Holiday".
+      - ``upper`` (optional): name of the upper-level resident who works this
+        holiday. Blank = unassigned (audit will flag).
+      - ``intern`` (optional): name of the intern who works this holiday. On
+        weekday holidays outside Block 1 the intern override replaces Night
+        Float for that day. Blank = unassigned.
+
+    Returns ``Dict[date, {"name": str, "upper": str|None, "intern": str|None}]``.
+    Membership checks (``if d in holidays``) keep working as before.
+    """
+    out: Dict[date, dict] = {}
     try:
         for row in _iter_excel_dict_rows(path):
             d = _parse_date(row["date"])
-            out[d] = str(row.get("name", "") or "").strip() or "Holiday"
+            name = str(row.get("name", "") or "").strip() or "Holiday"
+            upper = str(row.get("upper", "") or "").strip() or None
+            intern = str(row.get("intern", "") or "").strip() or None
+            out[d] = {"name": name, "upper": upper, "intern": intern}
     except FileNotFoundError:
         pass
     return out

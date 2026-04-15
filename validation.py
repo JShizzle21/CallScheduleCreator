@@ -169,8 +169,13 @@ def audit_schedule(
 
             # COMPLETED rows are accepted as ground truth — skip constraint
             # checks that the user may have manually overridden.
-            is_completed = row.get("note") == "COMPLETED"
-            if is_completed:
+            # HOLIDAY rows are manual overrides per user policy: residents
+            # named in holidays.xlsx work that day even if it conflicts with
+            # their no_call_days or NO_CALL rotation.
+            note = row.get("note") or ""
+            is_completed = note == "COMPLETED"
+            is_holiday = note.startswith("HOLIDAY:")
+            if is_completed or is_holiday:
                 continue
 
             resident_days = no_call_days.get(resident, {})
@@ -247,7 +252,8 @@ def audit_schedule(
 
     for d, rows in by_date.items():
         for row in rows:
-            if row.get("note") == "COMPLETED":
+            note = row.get("note") or ""
+            if note == "COMPLETED" or note.startswith("HOLIDAY:"):
                 continue
 
             resident = (row.get("resident") or "").strip()
