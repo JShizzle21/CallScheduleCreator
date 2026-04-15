@@ -22,6 +22,7 @@ OUTPUT_DIR = CONFIG.get("OUTPUT_DIR", "output")
 FLOW_XLSX = CONFIG.get("FLOW_XLSX", "data/flow.xlsx")
 SHEET_NAME = CONFIG.get("SHEET_NAME", "master_block_calendar")
 CLINIC_DAYS_XLSX = CONFIG.get("CLINIC_DAYS_XLSX", "data/clinic_days.xlsx")
+USE_COMPLETED_CALLS = int(CONFIG.get("USE_COMPLETED_CALLS", 0))
 COMPLETED_CALLS_XLSX = CONFIG.get("COMPLETED_CALLS_XLSX", "")
 
 POST_CALL_DAYS = CONFIG.get("POST_CALL_DAYS")
@@ -813,12 +814,12 @@ def export_result(result):
 if __name__ == "__main__":
     # When Block 1 intern weekday calls are enabled, we need the block 1 end date
     # so load_completed_calls can correctly classify weekday intern entries.
-    if INTERN_BLOCK1_WEEKDAY_CALLS and COMPLETED_CALLS_XLSX:
+    if USE_COMPLETED_CALLS and INTERN_BLOCK1_WEEKDAY_CALLS:
         _lu = ExcelRotationLookup(FLOW_XLSX, SHEET_NAME, ACADEMIC_YEAR_START)
         _block1_end = _lu.blocks[0].end if _lu.blocks else None
     else:
         _block1_end = None
-    completed = load_completed_calls(COMPLETED_CALLS_XLSX, block1_end=_block1_end) if COMPLETED_CALLS_XLSX else []
+    completed = load_completed_calls(COMPLETED_CALLS_XLSX, block1_end=_block1_end) if USE_COMPLETED_CALLS else []
 
     if completed:
         from datetime import timedelta as _td
