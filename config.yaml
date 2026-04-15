@@ -99,9 +99,13 @@ YEAR_BIAS_WEIGHT: 1.5
 # Rate-based pacing: each resident has an expected call count by date d, computed
 # from their share of every day's statically-eligible pool (rotation + no_call).
 # Residents ahead of their expected pace are deprioritized; residents behind pace
-# are preferred. Prevents first-half / second-half concentration caused by
-# alternating eligible and NO_CALL rotations.
+# are preferred. Smooths ad-hoc concentration when fairness catches up aggressively.
 PACE_WEIGHT: 1.0
+# Look-ahead bias: residents with fewer remaining eligible days through year-end
+# are preferred now. Pairs with pacing: pace smooths concentration after the
+# fact; lookahead is anticipatory, pushing residents forward before their
+# remaining runway shrinks. Prevents bunching when eligibility is front/back loaded.
+LOOKAHEAD_WEIGHT: 2.0
 
 # ---------------------------------------
 # Monte Carlo schedule ranking priority

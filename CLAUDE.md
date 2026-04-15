@@ -37,7 +37,7 @@ data/holidays.xlsx      ──► loader.load_holidays()
 
 scheduler_main.generate_schedule_once(seed)
     ├── validate inputs (validation.py)
-    ├── precompute expected_cum per resident (rate-based pacing target)
+    ├── precompute expected_cum (pacing target) + eligible_dates (lookahead)
     ├── day loop: eligible_for_slot → pick_best_candidate → apply_assignment
     ├── local_swap_pass (post-generation fairness repair, up to 10 iterations)
     └── audit_schedule (validation.py) → returns result dict
@@ -71,9 +71,11 @@ Two-level system applied lexicographically per `PICK_CANDIDATE_RANK_ORDER`:
 All five weighted-score components are normalized:
 - `fairness_norm = min(gap, MAX_DIFF_SOFT) / MAX_DIFF_SOFT`
 - `spacing_norm = spacing_tier / 2` (tier ∈ {0,1,2})
-- `avoid_value`, `year_bias`, and `pace_value` already in [0,1]
+- `avoid_value`, `year_bias`, `pace_value`, and `lookahead_value` already in [0,1]
 
-`pace_value` is a two-sided [0,1] signal comparing each resident's actual counter to their expected cumulative value by date `d`. Expected is precomputed once per seed: for each non-holiday day, each required slot splits 1/|pool| across its statically-eligible residents (rotation preference ≠ NO_CALL, no_call_days clean). `pace_value = clamp((actual - expected + MAX_DIFF_SOFT) / (2×MAX_DIFF_SOFT), 0, 1)` — 0 = far behind pace (preferred), 0.5 = on pace, 1 = far ahead (deprioritized). Smooths temporal clustering when fairness alone drives back-to-back assignments after a NO_CALL stretch.
+`pace_value` is a two-sided [0,1] signal comparing each resident's actual counter to their expected cumulative value by date `d`. Expected is precomputed once per seed: for each non-holiday day, each required slot splits 1/|pool| across its statically-eligible residents (rotation preference ≠ NO_CALL, no_call_days clean). `pace_value = clamp((actual - expected + MAX_DIFF_SOFT) / (2×MAX_DIFF_SOFT), 0, 1)` — 0 = far behind pace (preferred), 0.5 = on pace, 1 = far ahead (deprioritized). Corrective signal: smooths temporal clustering after it starts.
+
+`lookahead_value` is the ratio of remaining statically-eligible dates (today through year-end) vs. the pool maximum. 0 = no runway left (strongly preferred now), 1 = most runway in pool (deferrable). Anticipatory signal: pushes residents with shrinking runway forward before fairness has to catch up, complementing pacing. Pairs with `PACE_WEIGHT` — pacing acts after the fact, lookahead acts before.
 
 ### Post-generation local swap pass (`local_swap_pass`)
 
@@ -98,6 +100,7 @@ After the greedy day loop, runs up to 10 passes over all assigned slots looking 
 | `MAX_DIFF_SOFT/HARD` | Fairness gate thresholds for `soft_diff_flag` / `hard_diff_flag` |
 | `FAIRNESS_GAP_WEIGHT` etc. | Relative importance of each weighted-score component (all normalized to [0,1]) |
 | `PACE_WEIGHT` | Rate-based pacing: compares actual call counts to expected (share of each day's static pool). Two-sided signal — behind pace preferred, ahead pace deprioritized |
+| `LOOKAHEAD_WEIGHT` | Anticipatory runway bias: residents with fewer remaining eligible days through year-end are preferred now. Pairs with pacing — pace is corrective, lookahead is preemptive |
 | `PICK_CANDIDATE_RANK_ORDER` | Order of rank components; gates must precede `weighted_score` or the hard-diff gate is bypassed |
 | `MONTE_CARLO_SCORE_ORDER` | Priority of schedule-level metrics when selecting the best MC run |
 

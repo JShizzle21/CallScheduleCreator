@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import bisect
 import concurrent.futures
 import random
 import time
@@ -43,6 +44,7 @@ SPACING_WEIGHT = CONFIG.get("SPACING_WEIGHT")
 AVOID_WEIGHT = CONFIG.get("AVOID_WEIGHT")
 YEAR_BIAS_WEIGHT = CONFIG.get("YEAR_BIAS_WEIGHT")
 PACE_WEIGHT = CONFIG.get("PACE_WEIGHT", CONFIG.get("FUTURE_AVAIL_WEIGHT", 1.0))
+LOOKAHEAD_WEIGHT = CONFIG.get("LOOKAHEAD_WEIGHT", 1.0)
 
 
 ACADEMIC_DATE_START = datetime.strptime(ACADEMIC_DATE_START_STRING, "%Y-%m-%d").date()
@@ -277,12 +279,60 @@ def _precompute_expected_calls(
     return expected_cum
 
 
+def _precompute_eligible_dates(
+    lookup,
+    residents: Dict[str, dict],
+    rules: Dict[Tuple[str, int], str],
+    no_call_days: Dict[str, dict],
+    holidays: Dict[date, str],
+    block1_end: Optional[date],
+) -> Dict[str, list]:
+    """Per-resident sorted list of dates on which the resident is statically
+    eligible for any slot they can serve (holiday-free, rotation ≠ NO_CALL,
+    no_call_days clean, slot PGY matches resident PGY).
+
+    Used by the lookahead component of the weighted score: the count of
+    eligible dates still ahead of `d` measures how much runway the resident
+    has to spread their remaining calls over. Low runway → prefer now.
+    """
+    eligible_dates: Dict[str, list] = {name: [] for name in residents}
+    d = ACADEMIC_DATE_START
+    while d <= ACADEMIC_DATE_END:
+        if d not in holidays:
+            slots = required_slots(d, block1_end=block1_end)
+            for name, data in residents.items():
+                pgy = data["pgy"]
+                if no_call_days.get(name, {}).get(d) is not None:
+                    continue
+                rotation = lookup.rotation_on_date(name, d)
+                if rotation is None:
+                    continue
+                pref = rules.get((rotation, pgy))
+                if pref is None or pref == "NO_CALL":
+                    continue
+                # Only count the day if at least one required slot matches this
+                # resident's PGY — e.g. a PGY1 isn't "eligible" on a weekday in
+                # Block 2+ because only UPPER_WEEKDAY is required.
+                for slot in slots:
+                    if slot in (SLOT_INTERN_WEEKEND, SLOT_INTERN_WEEKDAY):
+                        if pgy == 1:
+                            eligible_dates[name].append(d)
+                            break
+                    else:
+                        if pgy in (2, 3):
+                            eligible_dates[name].append(d)
+                            break
+        d += timedelta(days=1)
+    return eligible_dates
+
+
 def _compute_weighted_score(
     fairness_gap: int,
     spacing_value: int,
     avoid_value: int,
     year_value: float,
     pace_value: float = 0.0,
+    lookahead_value: float = 0.0,
 ) -> float:
     """Combine ranking components into a single scalar.
 
@@ -301,6 +351,12 @@ def _compute_weighted_score(
     statically-eligible pool, accumulated through the current date.
     Defaults to 0.0 (no contribution) for callers that don't pass pacing
     data — pick_best_candidate always passes a computed value.
+
+    lookahead_value: [0, 1] ratio of the resident's remaining eligible
+    days through year-end vs. the pool maximum. 0 = no runway left
+    (strongly preferred now), 1 = most runway in the pool (can be
+    deferred). Anticipatory: pushes residents with shrinking future
+    availability forward before fairness has to catch up.
     """
     if MAX_DIFF_SOFT > 0:
         fairness_norm = min(fairness_gap, MAX_DIFF_SOFT) / MAX_DIFF_SOFT
@@ -315,6 +371,7 @@ def _compute_weighted_score(
         + AVOID_WEIGHT * avoid_value
         + YEAR_BIAS_WEIGHT * year_value
         + PACE_WEIGHT * pace_value
+        + LOOKAHEAD_WEIGHT * lookahead_value
     )
 
 
@@ -387,6 +444,7 @@ def pick_best_candidate(
     slot: str,
     rng: random.Random,
     expected_cum: Optional[Dict[str, Dict[str, Dict[date, float]]]] = None,
+    eligible_dates: Optional[Dict[str, list]] = None,
 ) -> Optional[Tuple[str, str, bool]]:
     if not eligible:
         return None
@@ -430,6 +488,20 @@ def pick_best_candidate(
     # Normalization scale: MAX_DIFF_SOFT, same threshold used for fairness_gap.
     pace_norm_scale = 2.0 * MAX_DIFF_SOFT if MAX_DIFF_SOFT > 0 else 2.0
 
+    # Look-ahead: remaining eligible days (today through year-end) per
+    # candidate, normalized against the pool maximum. Residents with
+    # shrinking runway get preferred before fairness has to catch up.
+    if eligible_dates is not None:
+        remaining_days = {
+            name: len(eligible_dates.get(name, []))
+                  - bisect.bisect_right(eligible_dates.get(name, []), d)
+            for name, _, _ in eligible
+        }
+        max_remaining = max(remaining_days.values(), default=0)
+    else:
+        remaining_days = {}
+        max_remaining = 0
+
     ranked_candidates = []
 
     for name, pref, rotation in eligible:
@@ -453,12 +525,18 @@ def pick_best_candidate(
         else:
             pace_value = 0.0
 
+        if max_remaining > 0:
+            lookahead_value = remaining_days.get(name, 0) / max_remaining
+        else:
+            lookahead_value = 0.0
+
         weighted_score = _compute_weighted_score(
             fairness_gap=fairness_gap,
             spacing_value=spacing_value,
             avoid_value=avoid_value,
             year_value=year_value,
             pace_value=pace_value,
+            lookahead_value=lookahead_value,
         )
 
         rank_components = {
@@ -719,6 +797,17 @@ def generate_schedule_once(seed=None, completed_assignments=None):
         block1_end=block1_end,
     )
 
+    # Per-resident sorted list of statically-eligible dates — used for the
+    # lookahead component (remaining runway through year-end).
+    eligible_dates = _precompute_eligible_dates(
+        lookup=lookup,
+        residents=residents,
+        rules=rules,
+        no_call_days=no_call,
+        holidays=holidays,
+        block1_end=block1_end,
+    )
+
     d = restart_date
     while d <= ACADEMIC_DATE_END:
         if d in holidays:
@@ -745,7 +834,7 @@ def generate_schedule_once(seed=None, completed_assignments=None):
             eligible, reasons = eligible_for_slot(
                 lookup, residents, rules, no_call, d, slot, intern_names, upper_names
             )
-            picked = pick_best_candidate(residents, eligible, d, slot, rng, expected_cum)
+            picked = pick_best_candidate(residents, eligible, d, slot, rng, expected_cum, eligible_dates)
 
             if picked is None:
                 schedule_rows.append({
@@ -804,6 +893,7 @@ def generate_schedule_once(seed=None, completed_assignments=None):
         "AVOID_WEIGHT": AVOID_WEIGHT,
         "YEAR_BIAS_WEIGHT": YEAR_BIAS_WEIGHT,
         "PACE_WEIGHT": PACE_WEIGHT,
+        "LOOKAHEAD_WEIGHT": LOOKAHEAD_WEIGHT,
     }
     audit_data["monte_carlo_score_order"] = MONTE_CARLO_SCORE_ORDER
     audit_data["swap_improvements"] = swap_count
