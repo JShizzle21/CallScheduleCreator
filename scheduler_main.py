@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import bisect
 import concurrent.futures
 import random
 import time
@@ -43,7 +42,7 @@ FAIRNESS_GAP_WEIGHT = CONFIG.get("FAIRNESS_GAP_WEIGHT")
 SPACING_WEIGHT = CONFIG.get("SPACING_WEIGHT")
 AVOID_WEIGHT = CONFIG.get("AVOID_WEIGHT")
 YEAR_BIAS_WEIGHT = CONFIG.get("YEAR_BIAS_WEIGHT")
-FUTURE_AVAIL_WEIGHT = CONFIG.get("FUTURE_AVAIL_WEIGHT")
+PACE_WEIGHT = CONFIG.get("PACE_WEIGHT", CONFIG.get("FUTURE_AVAIL_WEIGHT", 1.0))
 
 
 ACADEMIC_DATE_START = datetime.strptime(ACADEMIC_DATE_START_STRING, "%Y-%m-%d").date()
@@ -178,27 +177,130 @@ def would_exceed_window_cap(assigned_dates, d: date) -> bool:
     return False
 
 
+_SLOT_COUNTER_KEY: Dict[str, str] = {
+    SLOT_UPPER_WEEKDAY: "weekday_calls",
+    SLOT_UPPER_WEEKEND: "weekend_calls",
+    SLOT_INTERN_WEEKEND: "intern_calls",
+    SLOT_INTERN_WEEKDAY: "intern_calls",
+}
+
+
+def _static_pool_for_slot(
+    lookup,
+    residents: Dict[str, dict],
+    rules: Dict[Tuple[str, int], str],
+    no_call_days: Dict[str, dict],
+    d: date,
+    slot: str,
+    intern_names,
+    upper_names,
+) -> List[str]:
+    """Residents statically eligible for `slot` on day `d`.
+
+    Same checks as eligible_for_slot minus dynamic exclusions (post_call,
+    window_cap): this is "who *could* take this call ignoring recent
+    assignment history," which is what we need to compute an expected
+    share of each day's call load.
+    """
+    names = intern_names if slot in (SLOT_INTERN_WEEKEND, SLOT_INTERN_WEEKDAY) else upper_names
+    pool: List[str] = []
+    for name in names:
+        pgy = residents[name]["pgy"]
+        if slot in (SLOT_INTERN_WEEKEND, SLOT_INTERN_WEEKDAY):
+            if pgy != 1:
+                continue
+        else:
+            if pgy == 1:
+                continue
+        if no_call_days.get(name, {}).get(d) is not None:
+            continue
+        rotation = lookup.rotation_on_date(name, d)
+        if rotation is None:
+            continue
+        pref = rules.get((rotation, pgy))
+        if pref is None or pref == "NO_CALL":
+            continue
+        pool.append(name)
+    return pool
+
+
+def _precompute_expected_calls(
+    lookup,
+    residents: Dict[str, dict],
+    rules: Dict[Tuple[str, int], str],
+    no_call_days: Dict[str, dict],
+    holidays: Dict[date, str],
+    intern_names,
+    upper_names,
+    block1_end: Optional[date],
+) -> Dict[str, Dict[str, Dict[date, float]]]:
+    """Per-resident cumulative expected-call counts for each counter type.
+
+    For every (non-holiday) day, each required slot contributes 1/|pool|
+    to each statically-eligible resident's counter, where pool is the
+    static-eligibility pool for that slot. The returned structure gives
+    the cumulative expected value **as of the start of day d** (i.e.,
+    before day-d assignments are made), so it aligns directly with
+    residents[name][counter_key] inside pick_best_candidate.
+    """
+    counter_keys = ("weekday_calls", "weekend_calls", "intern_calls")
+    expected_cum: Dict[str, Dict[str, Dict[date, float]]] = {
+        name: {ck: {} for ck in counter_keys} for name in residents
+    }
+    running: Dict[str, Dict[str, float]] = {
+        name: {ck: 0.0 for ck in counter_keys} for name in residents
+    }
+
+    d = ACADEMIC_DATE_START
+    while d <= ACADEMIC_DATE_END:
+        # Snapshot BEFORE adding today's share: expected_cum[...][d] reflects
+        # the state at the start of day d, matching residents[name][ck] when
+        # pick_best_candidate is called for day d.
+        for name in residents:
+            for ck in counter_keys:
+                expected_cum[name][ck][d] = running[name][ck]
+
+        if d not in holidays:
+            for slot in required_slots(d, block1_end=block1_end):
+                ck = _SLOT_COUNTER_KEY[slot]
+                pool = _static_pool_for_slot(
+                    lookup, residents, rules, no_call_days, d, slot,
+                    intern_names, upper_names,
+                )
+                if pool:
+                    share = 1.0 / len(pool)
+                    for name in pool:
+                        running[name][ck] += share
+
+        d += timedelta(days=1)
+
+    return expected_cum
+
+
 def _compute_weighted_score(
     fairness_gap: int,
     spacing_value: int,
     avoid_value: int,
     year_value: float,
-    future_avail_value: float = 0.0,
+    pace_value: float = 0.0,
 ) -> float:
     """Combine ranking components into a single scalar.
 
     Each raw component lives on a different scale (fairness_gap is an
-    unbounded int, spacing_value is {0,1,2}, avoid/year/future_avail are
-    already in [0,1]). We normalize each to roughly [0, 1] so the *_WEIGHT
+    unbounded int, spacing_value is {0,1,2}, avoid/year/pace are already
+    in [0,1]). We normalize each to roughly [0, 1] so the *_WEIGHT
     constants express genuine relative importance.
 
     fairness_gap is clipped at MAX_DIFF_SOFT: above that threshold the
     soft/hard lexicographic gates have already separated candidates, so
     losing resolution there is acceptable.
 
-    future_avail_value: fraction of remaining call-eligible days this resident
-    has vs. the pool maximum. Higher = more days remaining = can be deferred =
-    less preferred now. Defaults to 0.0 (no look-ahead contribution).
+    pace_value: two-sided [0, 1] pacing signal. 0 = far behind expected
+    pace (preferred now), 0.5 = on pace (neutral), 1 = far ahead of pace
+    (deprioritized). Expected pace is the resident's share of every day's
+    statically-eligible pool, accumulated through the current date.
+    Defaults to 0.0 (no contribution) for callers that don't pass pacing
+    data — pick_best_candidate always passes a computed value.
     """
     if MAX_DIFF_SOFT > 0:
         fairness_norm = min(fairness_gap, MAX_DIFF_SOFT) / MAX_DIFF_SOFT
@@ -212,7 +314,7 @@ def _compute_weighted_score(
         + SPACING_WEIGHT * spacing_norm
         + AVOID_WEIGHT * avoid_value
         + YEAR_BIAS_WEIGHT * year_value
-        + FUTURE_AVAIL_WEIGHT * future_avail_value
+        + PACE_WEIGHT * pace_value
     )
 
 
@@ -284,7 +386,7 @@ def pick_best_candidate(
     d: date,
     slot: str,
     rng: random.Random,
-    future_eligible: Optional[Dict[str, list]] = None,
+    expected_cum: Optional[Dict[str, Dict[str, Dict[date, float]]]] = None,
 ) -> Optional[Tuple[str, str, bool]]:
     if not eligible:
         return None
@@ -322,19 +424,11 @@ def pick_best_candidate(
             return 1 - prog
         return 0.0
 
-    # Precompute future availability for each eligible candidate.
-    # remaining = # dates after d in their precomputed eligible list (static constraints only).
-    # Normalize within this eligible pool so the component is always in [0, 1].
-    # Higher remaining → more deferrable → higher score → less preferred now.
-    if future_eligible is not None:
-        future_remaining = {
-            name: len(future_eligible.get(name, [])) - bisect.bisect(future_eligible.get(name, []), d)
-            for name, _, _ in eligible
-        }
-        max_future_remaining = max(future_remaining.values(), default=0)
-    else:
-        future_remaining = {}
-        max_future_remaining = 0
+    # Rate-based pacing: compare each candidate's actual counter to the
+    # expected cumulative value by date d (their share of every day's static
+    # pool so far). Behind pace → preferred; ahead of pace → deprioritized.
+    # Normalization scale: MAX_DIFF_SOFT, same threshold used for fairness_gap.
+    pace_norm_scale = 2.0 * MAX_DIFF_SOFT if MAX_DIFF_SOFT > 0 else 2.0
 
     ranked_candidates = []
 
@@ -351,17 +445,20 @@ def pick_best_candidate(
         avoid_value = 1 if pref == "AVOID" else 0
         year_value = year_bias(pgy)
 
-        if max_future_remaining > 0:
-            future_avail_value = future_remaining.get(name, 0) / max_future_remaining
+        if expected_cum is not None:
+            expected = expected_cum.get(name, {}).get(counter_key, {}).get(d, 0.0)
+            ahead = data[counter_key] - expected
+            # Two-sided: 0 = far behind (preferred), 0.5 = on pace, 1 = far ahead.
+            pace_value = max(0.0, min(1.0, (ahead + MAX_DIFF_SOFT) / pace_norm_scale))
         else:
-            future_avail_value = 0.0
+            pace_value = 0.0
 
         weighted_score = _compute_weighted_score(
             fairness_gap=fairness_gap,
             spacing_value=spacing_value,
             avoid_value=avoid_value,
             year_value=year_value,
-            future_avail_value=future_avail_value,
+            pace_value=pace_value,
         )
 
         rank_components = {
@@ -606,23 +703,21 @@ def generate_schedule_once(seed=None, completed_assignments=None):
         restart_date = ACADEMIC_DATE_START
     # ─────────────────────────────────────────────────────────────────────────
 
-    # Precompute sorted lists of future call-eligible dates per resident.
-    # Uses static constraints only (rotation preference + no_call_days, which
-    # now includes pre-clinic blocks); post-call exclusions are dynamic.
-    future_eligible: Dict[str, list] = {}
-    for name, data in residents.items():
-        pgy = data["pgy"]
-        dates = []
-        di = ACADEMIC_DATE_START
-        while di <= ACADEMIC_DATE_END:
-            if di not in holidays and di not in no_call.get(name, {}):
-                rotation = lookup.rotation_on_date(name, di)
-                if rotation is not None:
-                    pref = rules.get((rotation, pgy))
-                    if pref not in (None, "NO_CALL"):
-                        dates.append(di)
-            di += timedelta(days=1)
-        future_eligible[name] = dates  # ascending order — ready for bisect
+    # Precompute cumulative expected-call counts per (resident, counter_key, date)
+    # using each day's static-eligibility pool. Each eligible resident is "owed"
+    # 1/|pool| per slot. The pacing signal compares actual counters to these
+    # expected values to prevent first-half/second-half concentration when a
+    # resident has alternating eligible and NO_CALL stretches.
+    expected_cum = _precompute_expected_calls(
+        lookup=lookup,
+        residents=residents,
+        rules=rules,
+        no_call_days=no_call,
+        holidays=holidays,
+        intern_names=intern_names,
+        upper_names=upper_names,
+        block1_end=block1_end,
+    )
 
     d = restart_date
     while d <= ACADEMIC_DATE_END:
@@ -650,7 +745,7 @@ def generate_schedule_once(seed=None, completed_assignments=None):
             eligible, reasons = eligible_for_slot(
                 lookup, residents, rules, no_call, d, slot, intern_names, upper_names
             )
-            picked = pick_best_candidate(residents, eligible, d, slot, rng, future_eligible)
+            picked = pick_best_candidate(residents, eligible, d, slot, rng, expected_cum)
 
             if picked is None:
                 schedule_rows.append({
@@ -708,7 +803,7 @@ def generate_schedule_once(seed=None, completed_assignments=None):
         "SPACING_WEIGHT": SPACING_WEIGHT,
         "AVOID_WEIGHT": AVOID_WEIGHT,
         "YEAR_BIAS_WEIGHT": YEAR_BIAS_WEIGHT,
-        "FUTURE_AVAIL_WEIGHT": FUTURE_AVAIL_WEIGHT,
+        "PACE_WEIGHT": PACE_WEIGHT,
     }
     audit_data["monte_carlo_score_order"] = MONTE_CARLO_SCORE_ORDER
     audit_data["swap_improvements"] = swap_count

@@ -96,8 +96,12 @@ FAIRNESS_GAP_WEIGHT: 3.0
 SPACING_WEIGHT: 1.0
 AVOID_WEIGHT: 0.25
 YEAR_BIAS_WEIGHT: 1.5
-# Prefer residents with fewer remaining call-eligible days (about to enter NO_CALL rotations)
-FUTURE_AVAIL_WEIGHT: 1.0
+# Rate-based pacing: each resident has an expected call count by date d, computed
+# from their share of every day's statically-eligible pool (rotation + no_call).
+# Residents ahead of their expected pace are deprioritized; residents behind pace
+# are preferred. Prevents first-half / second-half concentration caused by
+# alternating eligible and NO_CALL rotations.
+PACE_WEIGHT: 1.0
 
 # ---------------------------------------
 # Monte Carlo schedule ranking priority

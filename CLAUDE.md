@@ -37,7 +37,7 @@ data/holidays.xlsx      ──► loader.load_holidays()
 
 scheduler_main.generate_schedule_once(seed)
     ├── validate inputs (validation.py)
-    ├── precompute future_eligible per resident (static rotation + no_call_days)
+    ├── precompute expected_cum per resident (rate-based pacing target)
     ├── day loop: eligible_for_slot → pick_best_candidate → apply_assignment
     ├── local_swap_pass (post-generation fairness repair, up to 10 iterations)
     └── audit_schedule (validation.py) → returns result dict
@@ -71,9 +71,9 @@ Two-level system applied lexicographically per `PICK_CANDIDATE_RANK_ORDER`:
 All five weighted-score components are normalized:
 - `fairness_norm = min(gap, MAX_DIFF_SOFT) / MAX_DIFF_SOFT`
 - `spacing_norm = spacing_tier / 2` (tier ∈ {0,1,2})
-- `avoid_value`, `year_bias`, and `future_avail_norm` already in [0,1]
+- `avoid_value`, `year_bias`, and `pace_value` already in [0,1]
 
-`future_avail_norm` is the fraction of remaining call-eligible days this resident has vs. the pool maximum on the current day. Precomputed once per seed using static constraints (rotation + no_call_days, not post-call). Residents about to enter long NO_CALL rotations score low (preferred now).
+`pace_value` is a two-sided [0,1] signal comparing each resident's actual counter to their expected cumulative value by date `d`. Expected is precomputed once per seed: for each non-holiday day, each required slot splits 1/|pool| across its statically-eligible residents (rotation preference ≠ NO_CALL, no_call_days clean). `pace_value = clamp((actual - expected + MAX_DIFF_SOFT) / (2×MAX_DIFF_SOFT), 0, 1)` — 0 = far behind pace (preferred), 0.5 = on pace, 1 = far ahead (deprioritized). Smooths temporal clustering when fairness alone drives back-to-back assignments after a NO_CALL stretch.
 
 ### Post-generation local swap pass (`local_swap_pass`)
 
@@ -97,7 +97,7 @@ After the greedy day loop, runs up to 10 passes over all assigned slots looking 
 | `MIN_SPACING_DAYS_STRONG/MILD` | Soft spacing thresholds — only affect `spacing_tier` in weighted score, not eligibility |
 | `MAX_DIFF_SOFT/HARD` | Fairness gate thresholds for `soft_diff_flag` / `hard_diff_flag` |
 | `FAIRNESS_GAP_WEIGHT` etc. | Relative importance of each weighted-score component (all normalized to [0,1]) |
-| `FUTURE_AVAIL_WEIGHT` | Look-ahead bias toward residents with fewer remaining eligible call days |
+| `PACE_WEIGHT` | Rate-based pacing: compares actual call counts to expected (share of each day's static pool). Two-sided signal — behind pace preferred, ahead pace deprioritized |
 | `PICK_CANDIDATE_RANK_ORDER` | Order of rank components; gates must precede `weighted_score` or the hard-diff gate is bypassed |
 | `MONTE_CARLO_SCORE_ORDER` | Priority of schedule-level metrics when selecting the best MC run |
 
