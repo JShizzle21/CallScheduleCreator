@@ -39,9 +39,9 @@ def write_call_totals_xlsx(residents: dict, path: str) -> None:
     headers = [
         "name",
         "pgy",
+        "total_calls",
         "weekday_calls",
         "weekend_calls",
-        "total_calls",
         "Jul_Dec_calls",
         "Jan_Jun_calls",
     ]
@@ -58,13 +58,18 @@ def write_call_totals_xlsx(residents: dict, path: str) -> None:
     pgy2_fill = PatternFill("solid", fgColor="CFE2F3")
     pgy3_fill = PatternFill("solid", fgColor="F4CCCC")
 
+    # Vertical separators on the right edge of pgy (B), total_calls (C),
+    # and weekend_calls (E) — groups: identity | total | weekday/weekend | halves.
+    divider_cols = (2, 3, 5)
+    right_border = Border(right=Side(style="thin"))
+
     for name, r in residents.items():
         ws.append([
             name,
             r["pgy"],
+            r["total_calls"],
             r["weekday_calls"],
             r["weekend_calls"],
-            r["total_calls"],
             r["Jul_Dec_calls"],
             r["Jan_Jun_calls"],
         ])
@@ -80,11 +85,18 @@ def write_call_totals_xlsx(residents: dict, path: str) -> None:
         for col in range(1, 8):
             ws.cell(row=row_i, column=col).fill = fill
 
+        for col in divider_cols:
+            ws.cell(row=row_i, column=col).border = right_border
+
+    # Apply the same dividers to the header row so the lines are continuous.
+    for col in divider_cols:
+        ws.cell(row=1, column=col).border = right_border
+
     ws.column_dimensions["A"].width = 18
     ws.column_dimensions["B"].width = 8
-    ws.column_dimensions["C"].width = 15
+    ws.column_dimensions["C"].width = 12
     ws.column_dimensions["D"].width = 15
-    ws.column_dimensions["E"].width = 12
+    ws.column_dimensions["E"].width = 15
     ws.column_dimensions["F"].width = 18
     ws.column_dimensions["G"].width = 20
 
