@@ -31,6 +31,13 @@ COMPLETED_CALLS_XLSX: "data/completed_calls.xlsx"
 # (same as upper level). Set to 0 if Block 1 interns use Night Float (weekdays don't count).
 INTERN_BLOCK1_WEEKDAY_CALLS: 1
 
+# PGY3 graduation cutoff: PGY3 residents are excluded from call on this date
+# and all dates after (inclusive). PGY2s pick up the remaining upper-level
+# shifts. Omit or leave blank to disable (defaults to ACADEMIC_DATE_END + 1,
+# i.e. no cutoff). If the date is outside the academic year a warning is
+# printed and the cutoff is disabled.
+PGY3_CUTOFF_DATE: "2027-06-17"
+
 # Number of times to run the simulation in order to get the best Monte Carlo score
 SIMULATION_RUNS: 1000
 
@@ -117,7 +124,8 @@ MONTE_CARLO_SCORE_ORDER:
   - unassigned
   - upper_weekend_diff
   - upper_weekday_diff
-  - upper_total_diff
+  - pgy2_total_diff
+  - pgy3_total_diff
   - intern_weekend_diff
   - avoid_assignments
   - warnings

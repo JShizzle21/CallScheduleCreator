@@ -5,6 +5,8 @@ from datetime import date, timedelta
 
 from config import CONFIG
 
+from typing import Optional
+
 DATA_DIR = CONFIG.get("DATA_DIR", "data")
 OUTPUT_DIR = CONFIG.get("OUTPUT_DIR", "output")
 POST_CALL_DAYS = CONFIG.get("POST_CALL_DAYS", 2)
@@ -13,6 +15,18 @@ ACADEMIC_DATE_START_STRING = CONFIG.get("ACADEMIC_DATE_START_STRING", "2026-07-0
 ACADEMIC_DATE_END_STRING = CONFIG.get("ACADEMIC_DATE_END_STRING", "2027-06-30")
 ACADEMIC_DATE_START = datetime.strptime(ACADEMIC_DATE_START_STRING, "%Y-%m-%d").date()
 ACADEMIC_DATE_END = datetime.strptime(ACADEMIC_DATE_END_STRING, "%Y-%m-%d").date()
+
+# Import PGY3 cutoff for audit checking.  Parsed the same way as in
+# scheduler_main to avoid import-cycle dependency.
+_pgy3_cutoff_raw = CONFIG.get("PGY3_CUTOFF_DATE", "")
+PGY3_CUTOFF_DATE: Optional[date] = None
+if _pgy3_cutoff_raw and str(_pgy3_cutoff_raw).strip():
+    try:
+        _parsed = datetime.strptime(str(_pgy3_cutoff_raw).strip(), "%Y-%m-%d").date()
+        if ACADEMIC_DATE_START <= _parsed <= ACADEMIC_DATE_END:
+            PGY3_CUTOFF_DATE = _parsed
+    except ValueError:
+        pass
 
 
 def is_weekend(d: date) -> bool:
@@ -167,14 +181,25 @@ def audit_schedule(
             if slot in ("UPPER_WEEKDAY", "UPPER_WEEKEND") and pgy == 1:
                 errors.append(f"{d}: {resident} assigned to upper slot but is PGY1")
 
+            # PGY3 graduation cutoff check — flag if a PGY3 ended up
+            # scheduled on or after the cutoff (shouldn't happen via the
+            # normal loop, but catches manual errors or regressions).
+            # Holiday overrides are intentionally allowed (checked below).
+            note = row.get("note") or ""
+            is_completed = note == "COMPLETED"
+            is_holiday = note.startswith("HOLIDAY:")
+            if pgy == 3 and PGY3_CUTOFF_DATE is not None and d >= PGY3_CUTOFF_DATE:
+                if not is_completed and not is_holiday:
+                    errors.append(
+                        f"{d}: PGY3 {resident} assigned on/after graduation cutoff "
+                        f"({PGY3_CUTOFF_DATE})"
+                    )
+
             # COMPLETED rows are accepted as ground truth — skip constraint
             # checks that the user may have manually overridden.
             # HOLIDAY rows are manual overrides per user policy: residents
             # named in holidays.xlsx work that day even if it conflicts with
             # their no_call_days or NO_CALL rotation.
-            note = row.get("note") or ""
-            is_completed = note == "COMPLETED"
-            is_holiday = note.startswith("HOLIDAY:")
             if is_completed or is_holiday:
                 continue
 
@@ -223,6 +248,8 @@ def audit_schedule(
         warnings.append(f"{resident}: spacing < 7 days ({prev_date} -> {curr_date}, {spacing} days)")
 
     uppers = [r for r in residents.values() if r["pgy"] in (2, 3)]
+    pgy2s = [r for r in residents.values() if r["pgy"] == 2]
+    pgy3s = [r for r in residents.values() if r["pgy"] == 3]
     interns = [r for r in residents.values() if r["pgy"] == 1]
 
     upper_weekday_counts = [r["weekday_calls"] for r in uppers]
@@ -230,22 +257,40 @@ def audit_schedule(
     intern_weekend_counts = [r["intern_calls"] for r in interns]
     upper_total_counts = [r["total_calls"] for r in uppers]
 
+    pgy2_total_counts = [r["total_calls"] for r in pgy2s]
+    pgy3_total_counts = [r["total_calls"] for r in pgy3s]
+
+    def _diff(counts):
+        return (max(counts) - min(counts)) if counts else 0
+
     fairness_summary = {
         "upper_total_min": min(upper_total_counts) if upper_total_counts else 0,
         "upper_total_max": max(upper_total_counts) if upper_total_counts else 0,
-        "upper_total_diff": (max(upper_total_counts) - min(upper_total_counts)) if upper_total_counts else 0,
+        "upper_total_diff": _diff(upper_total_counts),
 
         "upper_weekday_min": min(upper_weekday_counts) if upper_weekday_counts else 0,
         "upper_weekday_max": max(upper_weekday_counts) if upper_weekday_counts else 0,
-        "upper_weekday_diff": (max(upper_weekday_counts) - min(upper_weekday_counts)) if upper_weekday_counts else 0,
+        "upper_weekday_diff": _diff(upper_weekday_counts),
 
         "upper_weekend_min": min(upper_weekend_counts) if upper_weekend_counts else 0,
         "upper_weekend_max": max(upper_weekend_counts) if upper_weekend_counts else 0,
-        "upper_weekend_diff": (max(upper_weekend_counts) - min(upper_weekend_counts)) if upper_weekend_counts else 0,
+        "upper_weekend_diff": _diff(upper_weekend_counts),
 
         "intern_weekend_min": min(intern_weekend_counts) if intern_weekend_counts else 0,
         "intern_weekend_max": max(intern_weekend_counts) if intern_weekend_counts else 0,
-        "intern_weekend_diff": (max(intern_weekend_counts) - min(intern_weekend_counts)) if intern_weekend_counts else 0,
+        "intern_weekend_diff": _diff(intern_weekend_counts),
+
+        # PGY2-only and PGY3-only fairness: when a graduation cutoff
+        # exists PGY2 totals naturally exceed PGY3 totals, so upper_total_diff
+        # conflates structural gap with within-cohort unfairness.  These
+        # per-cohort keys let the MC scorer evaluate within-PGY fairness.
+        "pgy2_total_min": min(pgy2_total_counts) if pgy2_total_counts else 0,
+        "pgy2_total_max": max(pgy2_total_counts) if pgy2_total_counts else 0,
+        "pgy2_total_diff": _diff(pgy2_total_counts),
+
+        "pgy3_total_min": min(pgy3_total_counts) if pgy3_total_counts else 0,
+        "pgy3_total_max": max(pgy3_total_counts) if pgy3_total_counts else 0,
+        "pgy3_total_diff": _diff(pgy3_total_counts),
     }
 
     avoid_assignments = []

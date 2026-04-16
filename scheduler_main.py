@@ -60,6 +60,29 @@ SLOT_INTERN_WEEKDAY = "INTERN_WEEKDAY"
 
 INTERN_BLOCK1_WEEKDAY_CALLS = int(CONFIG.get("INTERN_BLOCK1_WEEKDAY_CALLS", 0))
 
+# PGY3 graduation cutoff — inclusive: PGY3s are excluded on this date and after.
+# If omitted, blank, or outside the academic year range the cutoff is disabled
+# (effectively set to the day after ACADEMIC_DATE_END so it never fires).
+_pgy3_cutoff_raw = CONFIG.get("PGY3_CUTOFF_DATE", "")
+PGY3_CUTOFF_DATE: Optional[date] = None
+if _pgy3_cutoff_raw and str(_pgy3_cutoff_raw).strip():
+    try:
+        _parsed_cutoff = datetime.strptime(str(_pgy3_cutoff_raw).strip(), "%Y-%m-%d").date()
+        if ACADEMIC_DATE_START <= _parsed_cutoff <= ACADEMIC_DATE_END:
+            PGY3_CUTOFF_DATE = _parsed_cutoff
+        else:
+            print(
+                f"WARNING: PGY3_CUTOFF_DATE ({_parsed_cutoff}) is outside the academic year "
+                f"({ACADEMIC_DATE_START} – {ACADEMIC_DATE_END}). Cutoff disabled; "
+                f"PGY3s will be scheduled through the end of the academic year."
+            )
+    except ValueError:
+        print(
+            f"WARNING: PGY3_CUTOFF_DATE '{_pgy3_cutoff_raw}' is not a valid date "
+            f"(expected YYYY-MM-DD). Cutoff disabled; PGY3s will be scheduled "
+            f"through the end of the academic year."
+        )
+
 
 MONTE_CARLO_SCORE_ORDER = CONFIG.get(
     "MONTE_CARLO_SCORE_ORDER",
@@ -81,6 +104,8 @@ VALID_MONTE_CARLO_SCORE_KEYS = {
     "upper_weekend_diff",
     "upper_weekday_diff",
     "upper_total_diff",
+    "pgy2_total_diff",
+    "pgy3_total_diff",
     "intern_weekend_diff",
     "avoid_assignments",
     "warnings",
@@ -214,6 +239,9 @@ def _static_pool_for_slot(
         else:
             if pgy == 1:
                 continue
+        # PGY3 graduation cutoff mirrors eligible_for_slot.
+        if pgy == 3 and PGY3_CUTOFF_DATE is not None and d >= PGY3_CUTOFF_DATE:
+            continue
         if no_call_days.get(name, {}).get(d) is not None:
             continue
         rotation = lookup.rotation_on_date(name, d)
@@ -320,6 +348,9 @@ def _precompute_eligible_dates(
             slots = required_slots(d, block1_end=block1_end)
             for name, data in residents.items():
                 pgy = data["pgy"]
+                # PGY3 graduation cutoff: no eligible dates on/after cutoff.
+                if pgy == 3 and PGY3_CUTOFF_DATE is not None and d >= PGY3_CUTOFF_DATE:
+                    continue
                 if no_call_days.get(name, {}).get(d) is not None:
                     continue
                 rotation = lookup.rotation_on_date(name, d)
@@ -420,6 +451,11 @@ def eligible_for_slot(
                 reasons["pgy_mismatch"] = reasons.get("pgy_mismatch", 0) + 1
                 continue
 
+        # PGY3 graduation cutoff: PGY3s are excluded on/after the cutoff date.
+        if pgy == 3 and PGY3_CUTOFF_DATE is not None and d >= PGY3_CUTOFF_DATE:
+            reasons["pgy3_graduation_cutoff"] = reasons.get("pgy3_graduation_cutoff", 0) + 1
+            continue
+
         no_call_entry = no_call_days.get(name, {}).get(d)
         if no_call_entry is not None:
             # Use the stored reason so "pre_clinic_day" shows as a distinct
@@ -491,11 +527,22 @@ def pick_best_candidate(
             return 1
         return 0
 
+    # PGY3 year_bias uses a shorter year when a graduation cutoff is set:
+    # they ramp 0→1 over [ACADEMIC_DATE_START, PGY3_CUTOFF_DATE) instead of
+    # the full academic year, so they aren't pushed further into the late
+    # dates they can no longer serve.
+    if PGY3_CUTOFF_DATE is not None:
+        _pgy3_year_days = (PGY3_CUTOFF_DATE - ACADEMIC_DATE_START).days
+        pgy3_prog = (d - ACADEMIC_DATE_START).days / _pgy3_year_days if _pgy3_year_days > 0 else 1.0
+        pgy3_prog = min(pgy3_prog, 1.0)
+    else:
+        pgy3_prog = prog
+
     def year_bias(pgy: int) -> float:
         if slot in (SLOT_INTERN_WEEKEND, SLOT_INTERN_WEEKDAY):
             return 0.0
         if pgy == 3:
-            return prog
+            return pgy3_prog
         elif pgy == 2:
             return 1 - prog
         return 0.0
@@ -694,11 +741,15 @@ def local_swap_pass(
                 if is_post_call(residents[candidate], d):
                     continue
 
+                # Eligibility: PGY3 graduation cutoff
+                pgy = residents[candidate]["pgy"]
+                if pgy == 3 and PGY3_CUTOFF_DATE is not None and d >= PGY3_CUTOFF_DATE:
+                    continue
+
                 # Eligibility: rotation and preference
                 rotation = lookup.rotation_on_date(candidate, d)
                 if rotation is None:
                     continue
-                pgy = residents[candidate]["pgy"]
                 pref = rules.get((rotation, pgy))
                 if pref is None or pref == "NO_CALL":
                     continue
@@ -1067,6 +1118,8 @@ def monte_carlo_score(result):
         "errors": len(audit["errors"]),
         "unassigned": len(result["unassigned_rows"]),
         "upper_total_diff": fairness["upper_total_diff"],
+        "pgy2_total_diff": fairness["pgy2_total_diff"],
+        "pgy3_total_diff": fairness["pgy3_total_diff"],
         "upper_weekend_diff": fairness["upper_weekend_diff"],
         "upper_weekday_diff": fairness["upper_weekday_diff"],
         "intern_weekend_diff": fairness["intern_weekend_diff"],
