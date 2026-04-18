@@ -112,7 +112,7 @@ PACE_WEIGHT: 1.0
 # are preferred now. Pairs with pacing: pace smooths concentration after the
 # fact; lookahead is anticipatory, pushing residents forward before their
 # remaining runway shrinks. Prevents bunching when eligibility is front/back loaded.
-LOOKAHEAD_WEIGHT: 2.0
+LOOKAHEAD_WEIGHT: 3.0
 
 # ---------------------------------------
 # Monte Carlo schedule ranking priority
