@@ -435,6 +435,11 @@ def eligible_for_slot(
     upper_names,
 ) -> Tuple[List[Tuple[str, str, str]], Dict[str, int]]:
     eligible: List[Tuple[str, str, str]] = []
+    # Residents that pass every check except window_cap. Used as a fallback
+    # so the slot can still be filled when the cap would otherwise leave it
+    # unassigned (e.g. end-of-year when only a handful of residents are
+    # eligible and all have hit the rolling cap simultaneously).
+    fallback_capped: List[Tuple[str, str, str]] = []
     reasons: Dict[str, int] = {}
 
     names = intern_names if slot in (SLOT_INTERN_WEEKEND, SLOT_INTERN_WEEKDAY) else upper_names
@@ -468,9 +473,8 @@ def eligible_for_slot(
             reasons["post_call"] = reasons.get("post_call", 0) + 1
             continue
 
-        if would_exceed_window_cap(data["assigned_dates"], d):
-            reasons["window_cap"] = reasons.get("window_cap", 0) + 1
-            continue
+        # Check window cap — but don't hard-reject yet; collect separately.
+        is_capped = would_exceed_window_cap(data["assigned_dates"], d)
 
         rotation = lookup.rotation_on_date(name, d)
         if rotation is None:
@@ -486,7 +490,22 @@ def eligible_for_slot(
             reasons["rotation_no_call"] = reasons.get("rotation_no_call", 0) + 1
             continue
 
-        eligible.append((name, pref, rotation))
+        if is_capped:
+            fallback_capped.append((name, pref, rotation))
+        else:
+            eligible.append((name, pref, rotation))
+
+    # Always record how many candidates were window-capped (for audit/reasons).
+    if fallback_capped:
+        reasons["window_cap"] = reasons.get("window_cap", 0) + len(fallback_capped)
+
+    # Soft fallback: if no non-capped candidate exists but capped ones do,
+    # use them rather than leaving the slot unassigned. The rolling-window cap
+    # is designed to prevent burst patterns mid-year where non-capped
+    # alternatives exist; forcing an unassigned slot when the cap is the sole
+    # blocker serves no protective purpose.
+    if not eligible and fallback_capped:
+        return fallback_capped, reasons
 
     return eligible, reasons
 
