@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import bisect
 import concurrent.futures
+import logging
 import random
+import sys
 import time
 from datetime import date, datetime, timedelta
 from functools import partial
 from typing import Dict, List, Tuple, Optional
 
 from config import CONFIG
+from errors import ConfigError, DataValidationError, ScheduleError
 from excel_reader import ExcelRotationLookup
 from exports import write_call_totals_xlsx, write_call_schedule_xlsx, write_audit
 from loader import (
@@ -16,6 +19,8 @@ from loader import (
     load_clinic_days, load_completed_calls,
 )
 from validation import validate_rotations_against_rules, validate_no_call_days, audit_schedule
+
+logger = logging.getLogger(__name__)
 
 DATA_DIR = CONFIG.get("DATA_DIR", "data")
 OUTPUT_DIR = CONFIG.get("OUTPUT_DIR", "output")
@@ -71,16 +76,18 @@ if _pgy3_cutoff_raw and str(_pgy3_cutoff_raw).strip():
         if ACADEMIC_DATE_START <= _parsed_cutoff <= ACADEMIC_DATE_END:
             PGY3_CUTOFF_DATE = _parsed_cutoff
         else:
-            print(
-                f"WARNING: PGY3_CUTOFF_DATE ({_parsed_cutoff}) is outside the academic year "
-                f"({ACADEMIC_DATE_START} – {ACADEMIC_DATE_END}). Cutoff disabled; "
-                f"PGY3s will be scheduled through the end of the academic year."
+            logger.warning(
+                "WARNING: PGY3_CUTOFF_DATE (%s) is outside the academic year "
+                "(%s – %s). Cutoff disabled; PGY3s will be scheduled through "
+                "the end of the academic year.",
+                _parsed_cutoff, ACADEMIC_DATE_START, ACADEMIC_DATE_END,
             )
     except ValueError:
-        print(
-            f"WARNING: PGY3_CUTOFF_DATE '{_pgy3_cutoff_raw}' is not a valid date "
-            f"(expected YYYY-MM-DD). Cutoff disabled; PGY3s will be scheduled "
-            f"through the end of the academic year."
+        logger.warning(
+            "WARNING: PGY3_CUTOFF_DATE '%s' is not a valid date (expected "
+            "YYYY-MM-DD). Cutoff disabled; PGY3s will be scheduled through "
+            "the end of the academic year.",
+            _pgy3_cutoff_raw,
         )
 
 
@@ -113,7 +120,7 @@ VALID_MONTE_CARLO_SCORE_KEYS = {
 
 invalid_score_keys = [k for k in MONTE_CARLO_SCORE_ORDER if k not in VALID_MONTE_CARLO_SCORE_KEYS]
 if invalid_score_keys:
-    raise ValueError(
+    raise ConfigError(
         f"Invalid MONTE_CARLO_SCORE_ORDER entries: {invalid_score_keys}. "
         f"Valid options are: {sorted(VALID_MONTE_CARLO_SCORE_KEYS)}"
     )
@@ -139,7 +146,7 @@ invalid_pick_rank_keys = [
 ]
 
 if invalid_pick_rank_keys:
-    raise ValueError(
+    raise ConfigError(
         f"Invalid PICK_CANDIDATE_RANK_ORDER entries: {invalid_pick_rank_keys}. "
         f"Valid options are: {sorted(VALID_PICK_CANDIDATE_RANK_KEYS)}"
     )
@@ -873,19 +880,19 @@ def _pre_apply_holidays(
         for slot, name in ((upper_slot, upper_name), (intern_slot, intern_name)):
             if name:
                 if name not in residents:
-                    raise ValueError(
+                    raise DataValidationError(
                         f"Holiday file references unknown resident '{name}' on "
                         f"{d} ({display_name}). Check that names match the flow "
                         f"sheet exactly."
                     )
                 pgy = residents[name]["pgy"]
                 if slot in (SLOT_INTERN_WEEKEND, SLOT_INTERN_WEEKDAY) and pgy != 1:
-                    raise ValueError(
+                    raise DataValidationError(
                         f"Holiday file assigns '{name}' (PGY{pgy}) to the intern "
                         f"slot on {d} ({display_name}). Interns must be PGY1."
                     )
                 if slot in (SLOT_UPPER_WEEKDAY, SLOT_UPPER_WEEKEND) and pgy == 1:
-                    raise ValueError(
+                    raise DataValidationError(
                         f"Holiday file assigns '{name}' (PGY1) to the upper slot "
                         f"on {d} ({display_name}). Upper residents must be PGY2 or PGY3."
                     )
@@ -975,7 +982,7 @@ def generate_schedule_once(seed=None, completed_assignments=None):
     if completed_assignments:
         for ca_date, ca_name, ca_slot in completed_assignments:
             if ca_name not in residents:
-                raise ValueError(
+                raise DataValidationError(
                     f"Completed call file references unknown resident '{ca_name}' "
                     f"on {ca_date}. Check that names match the flow sheet exactly."
                 )
@@ -1169,14 +1176,14 @@ def run_simulation(num_runs=50, completed_assignments=None):
         for future in concurrent.futures.as_completed(futures):
             seed, score = future.result()
             seed_scores.append((seed, score))
-            print(f"[{len(seed_scores)}/{num_runs}] seed={seed} | {format_monte_carlo_score(score)}")
+            logger.info(f"[{len(seed_scores)}/{num_runs}] seed={seed} | {format_monte_carlo_score(score)}")
 
     best_seed, best_score = min(seed_scores, key=lambda x: x[1])
     best_result = generate_schedule_once(seed=best_seed, completed_assignments=completed_assignments)
 
     end = time.time()
-    print(f"\nSimulation completed in {end - start:.2f} seconds")
-    print(f"Best run: seed={best_seed} | {format_monte_carlo_score(best_score)}\n")
+    logger.info(f"\nSimulation completed in {end - start:.2f} seconds")
+    logger.info(f"Best run: seed={best_seed} | {format_monte_carlo_score(best_score)}\n")
 
     return best_result
 
@@ -1191,9 +1198,9 @@ def export_result(result):
     audit_data = result["audit_data"]
     seed = audit_data.get("seed", "N/A")
 
-    print("\nFINAL SCHEDULE SELECTION")
-    print(f"Seed used: {seed}")
-    print(f"Tie-break decisions: {audit_data.get('tiebreaker_count', 0)}")
+    logger.info("\nFINAL SCHEDULE SELECTION")
+    logger.info(f"Seed used: {seed}")
+    logger.info(f"Tie-break decisions: {audit_data.get('tiebreaker_count', 0)}")
 
     intern_names = [n for n, r in residents.items() if r["pgy"] == 1]
 
@@ -1206,16 +1213,26 @@ def export_result(result):
         lookup,
         intern_names,
     )
-    print("Excel files exported:")
-    print(f"  {DATA_DIR}/{OUTPUT_DIR}/call_totals.xlsx")
-    print(f"  {DATA_DIR}/{OUTPUT_DIR}/call_schedule.xlsx")
+    logger.info("Excel files exported:")
+    logger.info(f"  {DATA_DIR}/{OUTPUT_DIR}/call_totals.xlsx")
+    logger.info(f"  {DATA_DIR}/{OUTPUT_DIR}/call_schedule.xlsx")
 
     audit_data = result["audit_data"]
     write_audit(audit_data, path=f"{DATA_DIR}/{OUTPUT_DIR}/audit_report.txt")
-    print(f"Wrote to: {DATA_DIR}/{OUTPUT_DIR}/audit_report.txt")
+    logger.info(f"Wrote to: {DATA_DIR}/{OUTPUT_DIR}/audit_report.txt")
 
 
-if __name__ == "__main__":
+def _main() -> int:
+    # Stream plain messages to stdout so output matches the pre-logging
+    # print()-based CLI byte-for-byte. force=True in case an ancestor import
+    # already installed a root handler (e.g. a library-style basicConfig).
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(message)s",
+        stream=sys.stdout,
+        force=True,
+    )
+
     # When Block 1 intern weekday calls are enabled, we need the block 1 end date
     # so load_completed_calls can correctly classify weekday intern entries.
     if USE_COMPLETED_CALLS and INTERN_BLOCK1_WEEKDAY_CALLS:
@@ -1228,10 +1245,20 @@ if __name__ == "__main__":
     if completed:
         from datetime import timedelta as _td
         restart = max(d for d, _, _ in completed) + _td(days=1)
-        print(f"Partial year mode: {len(completed)} completed call(s) loaded.")
-        print(f"Generating schedule from {restart} onward.\n")
+        logger.info(f"Partial year mode: {len(completed)} completed call(s) loaded.")
+        logger.info(f"Generating schedule from {restart} onward.\n")
     else:
-        print("Full year mode: generating schedule from scratch.\n")
+        logger.info("Full year mode: generating schedule from scratch.\n")
 
     best_result = run_simulation(num_runs=SIMULATION_RUNS, completed_assignments=completed)
     export_result(best_result)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(_main())
+    except ScheduleError as exc:
+        # Friendly prose for known, user-actionable failures.
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
