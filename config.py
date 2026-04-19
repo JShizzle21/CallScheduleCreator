@@ -1,6 +1,11 @@
-import yaml
+from __future__ import annotations
+
+from pathlib import Path
+
+from ruamel.yaml import YAML
 
 CONFIG_PATH = "config.yaml"
+LEGACY_GUI_CONFIG_PATH = "gui_config.yaml"
 
 REQUIRED_KEYS = [
     "ACADEMIC_DATE_START_STRING",
@@ -47,9 +52,21 @@ _PATH_DEFAULTS = {
 }
 
 
+def _safe_yaml() -> YAML:
+    """YAML instance for read-only loads — returns plain Python dicts."""
+    return YAML(typ="safe")
+
+
+def _round_trip_yaml() -> YAML:
+    """YAML instance that preserves comments and formatting on dump."""
+    y = YAML()
+    y.preserve_quotes = True
+    return y
+
+
 def load_config(path: str = CONFIG_PATH) -> dict:
     with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        return _safe_yaml().load(f)
 
 
 def validate_config(config: dict) -> None:
@@ -81,6 +98,52 @@ def load_default_config(path: str = CONFIG_PATH) -> tuple[dict, dict]:
 
     config = {k: v for k, v in raw.items() if k not in _PATH_KEY_MAP}
     return config, paths
+
+
+def save_config(values: dict, path: str = CONFIG_PATH) -> None:
+    """Overwrite `path` with updated values, preserving comments and formatting.
+
+    Only keys present in `values` are updated; all other keys (including path
+    keys not exposed to the GUI) and every comment in the original file are
+    preserved via ruamel.yaml round-tripping.
+
+    Raises FileNotFoundError if `path` does not exist — we never create a
+    config file from scratch, because that would discard the explanatory
+    comments the original file carries.
+    """
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(
+            f"Cannot save config: {path} not found. save_config updates an "
+            f"existing file in-place to preserve comments; create the file "
+            f"manually first."
+        )
+
+    y = _round_trip_yaml()
+    with open(p, "r", encoding="utf-8") as f:
+        data = y.load(f)
+
+    for key, value in values.items():
+        data[key] = value
+
+    with open(p, "w", encoding="utf-8") as f:
+        y.dump(data, f)
+
+
+def legacy_gui_config_warning(path: str = LEGACY_GUI_CONFIG_PATH) -> str | None:
+    """Return a warning message if a legacy gui_config.yaml is on disk, else None.
+
+    Earlier GUI designs considered persisting overrides to gui_config.yaml. The
+    final design (docs/gui_plan.md §4.5) writes back to config.yaml directly,
+    so gui_config.yaml should never exist. If it does — left behind by a
+    crashed future version or manually placed — tell the user it is ignored.
+    """
+    if Path(path).exists():
+        return (
+            f"{path} was found on disk. The CLI does not read this file. "
+            f"Delete it or run the GUI to clean up."
+        )
+    return None
 
 
 # Backward compatibility: existing modules (loader.py) import CONFIG at module

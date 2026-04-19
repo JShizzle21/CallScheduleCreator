@@ -11,7 +11,7 @@ from datetime import date, datetime, timedelta
 from functools import partial
 from typing import Callable, Dict, List, Tuple, Optional
 
-from config import CONFIG, load_default_config
+from config import CONFIG, load_default_config, legacy_gui_config_warning
 from data_bundle import DataBundle, load_data_bundle
 from errors import ConfigError, DataValidationError, ScheduleError
 from exports import write_call_totals_xlsx, write_call_schedule_xlsx, write_audit
@@ -1369,6 +1369,10 @@ def _main() -> int:
         stream=sys.stdout,
         force=True,
     )
+
+    warning = legacy_gui_config_warning()
+    if warning is not None:
+        logger.warning(warning)
 
     config, paths = load_default_config()
     _apply_config(config)
