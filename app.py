@@ -17,19 +17,32 @@ Runtime notes:
 
 from __future__ import annotations
 
+import logging
+import queue
 import shutil
 import tempfile
+import threading
 import time
+import traceback
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
+import pandas as pd
 import streamlit as st
 from openpyxl import load_workbook
 
 from config import load_default_config, save_config
+
+# Imported lazily-ish (top-level is fine — these modules already import on
+# every CLI run). Bringing them in at module top keeps the run-button
+# handler simple. The scheduler module installs no logging handlers at
+# import; we attach our own per-run handler in _run_simulation_thread.
+from scheduler_main import run_simulation
+from data_bundle import load_data_bundle
+from loader import load_completed_calls
 
 TMPDIR_PREFIX = "CallScheduler_"
 ORPHAN_AGE_SECONDS = 24 * 3600
@@ -254,6 +267,17 @@ def _init_session_state() -> None:
     # Seed config once. Phase 5b will wire widgets to these values.
     config, _paths = load_default_config()
     st.session_state.config = config
+    # Run-section state. See _start_run / _drain_queue / _render_run_section.
+    st.session_state.run_state = "idle"
+    st.session_state.last_log_lines = []
+    st.session_state.last_progress = None
+    st.session_state.last_result = None
+    st.session_state.last_run_kind = None
+    st.session_state.run_queue = None
+    st.session_state.run_thread = None
+    st.session_state.run_cancel_event = None
+    st.session_state.run_error = None
+    st.session_state.run_trace = None
     st.session_state.initialized = True
 
 
@@ -911,6 +935,716 @@ def _render_settings_section() -> tuple[bool, list[str]]:
 
 
 # ---------------------------------------------------------------------------
+# Run section — background thread, progress queue, log handler
+# ---------------------------------------------------------------------------
+
+# Quick preview seed count. Hardcoded for now; empirical tuning is
+# tracked in docs/gui_plan.md §10.1.
+QUICK_PREVIEW_RUNS = 50
+
+# Output directory for the three xlsx/txt artifacts. Spec §2 says these
+# overwrite each run, matching CLI behavior.
+OUTPUT_SUBDIR = "output"
+DATA_DIR_FOR_OUTPUT = "data"
+
+# Polling cadence while a run is in flight. Drives the time.sleep() →
+# st.rerun() loop at the bottom of main(). Short enough that the log
+# feels live, long enough that we don't burn CPU re-rendering. See
+# decision in handoff: option (a) — sleep + rerun, no extra deps.
+RUN_POLL_INTERVAL_SEC = 0.4
+
+
+class _QueueLogHandler(logging.Handler):
+    """Logging handler that pushes formatted records onto a queue.
+
+    Attached to the scheduler_main logger for the duration of a run so
+    every logger.info() line (per-seed scores, holiday warnings, the
+    'Simulation completed' line) flows into the GUI log area. Detached
+    in the thread's finally block.
+    """
+
+    def __init__(self, q: "queue.Queue[dict]") -> None:
+        super().__init__(level=logging.INFO)
+        self._q = q
+        self.setFormatter(logging.Formatter("%(message)s"))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self._q.put_nowait({"type": "log", "line": self.format(record)})
+        except Exception:
+            # Never let logging failures kill the run.
+            pass
+
+
+def _build_paths_from_uploads() -> dict:
+    """Build the paths dict run_simulation expects from the session tmpdir.
+
+    Required-slot files are guaranteed present (the Run button is gated
+    on _all_required_valid). Optional slots fall back to "" — the loader
+    treats empty strings as "no file" for clinic_days and
+    completed_calls.
+    """
+    tmpdir: Path = st.session_state.tmpdir
+    paths = {
+        "flow_xlsx": str(tmpdir / "flow.xlsx"),
+        "sheet_name": "master_block_calendar",
+        "rotation_rules_xlsx": str(tmpdir / "rotation_rules.xlsx"),
+        "no_call_days_xlsx": str(tmpdir / "no_call_days.xlsx"),
+        "holidays_xlsx": str(tmpdir / "holidays.xlsx"),
+        "clinic_days_xlsx": "",
+        "completed_calls_xlsx": "",
+        "data_dir": DATA_DIR_FOR_OUTPUT,
+        "output_dir": OUTPUT_SUBDIR,
+    }
+    clinic_entry = st.session_state.uploads.get("clinic_days")
+    if clinic_entry and clinic_entry["error"] is None:
+        paths["clinic_days_xlsx"] = str(tmpdir / "clinic_days.xlsx")
+    completed_entry = st.session_state.uploads.get("completed_calls")
+    if completed_entry and completed_entry["error"] is None:
+        paths["completed_calls_xlsx"] = str(tmpdir / "completed_calls.xlsx")
+    return paths
+
+
+def _preflight_completed_assignments(config: dict, paths: dict) -> list:
+    """Mirror scheduler_main._main()'s completed-calls preflight.
+
+    When USE_COMPLETED_CALLS is on, we need to load completed assignments
+    once before kicking off the Monte Carlo loop. block1_end is required
+    to classify weekday intern entries; we get it by loading the bundle
+    once with use_completed_calls=False (cheap).
+    """
+    if not bool(int(config.get("USE_COMPLETED_CALLS", 0))):
+        return []
+    if not paths.get("completed_calls_xlsx"):
+        raise FileNotFoundError(
+            "Partial-year mode is on but no completed_calls.xlsx was uploaded."
+        )
+
+    intern_block1 = bool(int(config.get("INTERN_BLOCK1_WEEKDAY_CALLS", 0)))
+    block1_end = None
+    if intern_block1:
+        academic_start = date.fromisoformat(
+            str(config["ACADEMIC_DATE_START_STRING"])
+        )
+        bundle = load_data_bundle(
+            paths,
+            academic_year_start=academic_start.year,
+            intern_block1_weekday_calls=True,
+            use_completed_calls=False,
+        )
+        block1_end = bundle.block1_end
+    return load_completed_calls(paths["completed_calls_xlsx"], block1_end=block1_end)
+
+
+def _run_simulation_thread(
+    num_runs: int,
+    config: dict,
+    paths: dict,
+    completed_assignments: list,
+    q: "queue.Queue[dict]",
+    cancel_event: threading.Event,
+) -> None:
+    """Background-thread entry point. Streams progress + logs into the queue.
+
+    Attaches a QueueLogHandler to the scheduler_main logger so every
+    logger.info() line flows into the GUI log area; detaches it in the
+    finally block. Final outcome is one of: done / cancelled / error.
+    """
+    sched_logger = logging.getLogger("scheduler_main")
+    handler = _QueueLogHandler(q)
+    prev_level = sched_logger.level
+    sched_logger.addHandler(handler)
+    sched_logger.setLevel(logging.INFO)
+    try:
+        def _progress(completed: int, total: int, info: dict) -> None:
+            q.put_nowait({
+                "type": "progress",
+                "completed": completed,
+                "total": total,
+                "best_seed": info.get("best_seed"),
+                "best_score": info.get("best_score"),
+            })
+
+        result = run_simulation(
+            num_runs=num_runs,
+            config=config,
+            paths=paths,
+            completed_assignments=completed_assignments,
+            progress_callback=_progress,
+            cancel_event=cancel_event,
+        )
+        if result is None:
+            q.put_nowait({"type": "cancelled"})
+        else:
+            # Write artifacts on the worker thread so download buttons can
+            # stream them straight from disk in the main thread (matches
+            # the bytes the CLI produces — see handoff #3).
+            from scheduler_main import export_result
+            try:
+                export_result(result, paths=paths)
+            except Exception as exc:
+                q.put_nowait({
+                    "type": "error",
+                    "message": f"Schedule generated but writing output files failed: {exc}",
+                    "trace": traceback.format_exc(),
+                })
+                return
+            q.put_nowait({"type": "done", "result": result})
+    except Exception as exc:
+        q.put_nowait({
+            "type": "error",
+            "message": str(exc),
+            "trace": traceback.format_exc(),
+        })
+    finally:
+        sched_logger.removeHandler(handler)
+        sched_logger.setLevel(prev_level)
+
+
+def _drain_queue() -> None:
+    """Pull all pending events from the run queue into session_state.
+
+    Called at the top of every rerun while a run is in flight. Mutates
+    last_log_lines, last_progress, run_state, last_result, run_error.
+    """
+    q: Optional["queue.Queue[dict]"] = st.session_state.get("run_queue")
+    if q is None:
+        return
+    while True:
+        try:
+            evt = q.get_nowait()
+        except queue.Empty:
+            break
+        kind = evt.get("type")
+        if kind == "log":
+            st.session_state.last_log_lines.append(evt["line"])
+            # Cap to last 500 lines so memory + render stay bounded.
+            if len(st.session_state.last_log_lines) > 500:
+                del st.session_state.last_log_lines[:-500]
+        elif kind == "progress":
+            st.session_state.last_progress = {
+                "completed": evt["completed"],
+                "total": evt["total"],
+                "best_seed": evt["best_seed"],
+                "best_score": evt["best_score"],
+            }
+        elif kind == "done":
+            st.session_state.last_result = evt["result"]
+            st.session_state.run_state = "done"
+        elif kind == "cancelled":
+            st.session_state.run_state = "cancelled"
+        elif kind == "error":
+            st.session_state.run_error = evt["message"]
+            st.session_state.run_trace = evt.get("trace", "")
+            st.session_state.run_state = "error"
+
+
+def _start_run(num_runs: int, kind: str) -> None:
+    """Kick off a background simulation thread.
+
+    Clears prior results/log/progress, builds paths + preflight, then
+    launches the thread. State transitions to 'running'; the next rerun
+    picks up progress via _drain_queue.
+    """
+    config = dict(st.session_state.config)
+    paths = _build_paths_from_uploads()
+    Path(f"{paths['data_dir']}/{paths['output_dir']}").mkdir(parents=True, exist_ok=True)
+
+    try:
+        completed = _preflight_completed_assignments(config, paths)
+    except Exception as exc:
+        st.session_state.run_state = "error"
+        st.session_state.run_error = f"Preflight failed: {exc}"
+        st.session_state.run_trace = traceback.format_exc()
+        return
+
+    st.session_state.last_result = None
+    st.session_state.last_log_lines = []
+    st.session_state.last_progress = {
+        "completed": 0,
+        "total": num_runs,
+        "best_seed": None,
+        "best_score": None,
+    }
+    st.session_state.last_run_kind = kind
+    st.session_state.run_error = None
+    st.session_state.run_trace = None
+    st.session_state.run_queue = queue.Queue()
+    st.session_state.run_cancel_event = threading.Event()
+    st.session_state.run_state = "running"
+
+    thread = threading.Thread(
+        target=_run_simulation_thread,
+        args=(
+            num_runs,
+            config,
+            paths,
+            completed,
+            st.session_state.run_queue,
+            st.session_state.run_cancel_event,
+        ),
+        daemon=True,
+    )
+    st.session_state.run_thread = thread
+    thread.start()
+
+
+def _request_cancel() -> None:
+    ev: Optional[threading.Event] = st.session_state.get("run_cancel_event")
+    if ev is not None:
+        ev.set()
+
+
+def _render_run_section(uploads_ready: bool, settings_has_errors: bool, soft_warnings: list[str]) -> None:
+    state = st.session_state.get("run_state", "idle")
+
+    if not uploads_ready:
+        st.warning("Upload all required files above before running.")
+    if settings_has_errors:
+        st.error("Fix the validation errors in Settings before running.")
+    if soft_warnings:
+        with st.expander(f"Configuration warnings ({len(soft_warnings)})", expanded=False):
+            for w in soft_warnings:
+                st.warning(w)
+    if state == "running":
+        st.info(
+            "A simulation is in progress. Avoid refreshing the browser — a "
+            "hard refresh will discard the live progress (the background "
+            "process keeps running but its result is lost)."
+        )
+
+    full_runs = int(st.session_state.config.get("SIMULATION_RUNS", 1000))
+
+    cols = st.columns([1, 1, 4])
+    run_disabled = (
+        not uploads_ready
+        or settings_has_errors
+        or state == "running"
+    )
+    if cols[0].button(
+        f"Quick preview ({QUICK_PREVIEW_RUNS} runs)",
+        disabled=run_disabled,
+        key="btn_quick",
+        help="Fast iteration — runs a small number of seeds. Uses the same config as Full run.",
+    ):
+        _start_run(QUICK_PREVIEW_RUNS, kind="quick")
+        st.rerun()
+    if cols[1].button(
+        f"Full run ({full_runs} runs)",
+        type="primary",
+        disabled=run_disabled,
+        key="btn_full",
+    ):
+        _start_run(full_runs, kind="full")
+        st.rerun()
+    if state == "running":
+        if cols[2].button("Cancel", key="btn_cancel"):
+            _request_cancel()
+
+    if state in ("running", "done", "cancelled", "error"):
+        prog = st.session_state.get("last_progress") or {}
+        completed = prog.get("completed", 0)
+        total = prog.get("total", 1) or 1
+        fraction = min(1.0, completed / total) if total else 0.0
+        best_score = prog.get("best_score")
+        best_seed = prog.get("best_seed")
+        if state == "running":
+            label = f"Run {completed} / {total}"
+        elif state == "done":
+            label = f"Completed {completed} / {total}"
+        elif state == "cancelled":
+            label = f"Cancelled at {completed} / {total}"
+        else:
+            label = f"Error at {completed} / {total}"
+        if best_score is not None:
+            label += f" — best so far: seed={best_seed}, score={best_score}"
+        st.progress(fraction, text=label)
+
+        log_lines = st.session_state.get("last_log_lines") or []
+        if log_lines:
+            st.text_area(
+                "Live log",
+                value="\n".join(log_lines[-200:]),
+                height=200,
+                key="run_log_view",
+                disabled=True,
+            )
+
+    if state == "error":
+        st.error(st.session_state.get("run_error") or "Simulation failed.")
+        with st.expander("Error details (traceback)"):
+            st.code(st.session_state.get("run_trace") or "", language="text")
+    elif state == "cancelled" and st.session_state.get("last_result") is None:
+        st.info("Cancelled — no schedule generated yet.")
+
+
+# ---------------------------------------------------------------------------
+# Results section
+# ---------------------------------------------------------------------------
+
+
+# Map the GUI table's PGY tint colors. Mirrors the xlsx fills used by
+# write_call_totals_xlsx (PGY1 green, PGY2 blue, PGY3 red) so the table
+# reads the same as the spreadsheet.
+_PGY_ROW_COLORS = {
+    1: "#D9EAD3",
+    2: "#CFE2F3",
+    3: "#F4CCCC",
+}
+
+
+def _format_score_tuple(score, order: list[str]) -> str:
+    if score is None:
+        return "—"
+    return ", ".join(f"{k}={v}" for k, v in zip(order, score))
+
+
+def _output_paths() -> dict:
+    base = Path(DATA_DIR_FOR_OUTPUT) / OUTPUT_SUBDIR
+    return {
+        "schedule": base / "call_schedule.xlsx",
+        "totals": base / "call_totals.xlsx",
+        "audit": base / "audit_report.txt",
+    }
+
+
+def _read_bytes(p: Path) -> bytes:
+    try:
+        return p.read_bytes()
+    except OSError:
+        return b""
+
+
+def _render_status_banner(result: dict) -> None:
+    audit = result["audit_data"]
+    n_errors = len(audit.get("errors", []))
+    n_warnings = len(audit.get("warnings", []))
+    n_unassigned = len(result.get("unassigned_rows", []))
+    score = audit.get("monte_carlo_score_order", [])
+    # Recompute MC score from the result so the banner matches what the
+    # selector picked (this run's actual tuple, not the last-seen partial).
+    from scheduler_main import monte_carlo_score
+    mc = monte_carlo_score(result)
+    score_str = _format_score_tuple(mc, score)
+    summary = (
+        f"{n_warnings} warning(s), {n_errors} error(s), "
+        f"{n_unassigned} unassigned slot(s). MC score: {score_str}"
+    )
+    if n_errors > 0:
+        st.error(f"Completed with errors. {summary}")
+    elif n_warnings > 0 or n_unassigned > 0:
+        st.warning(f"Completed with warnings. {summary}")
+    else:
+        st.success(f"Schedule generated successfully. {summary}")
+
+
+def _render_downloads() -> None:
+    paths = _output_paths()
+    cols = st.columns(3)
+    cols[0].download_button(
+        "⬇ call_schedule.xlsx",
+        data=_read_bytes(paths["schedule"]),
+        file_name="call_schedule.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        disabled=not paths["schedule"].exists(),
+        key="dl_schedule",
+    )
+    cols[1].download_button(
+        "⬇ call_totals.xlsx",
+        data=_read_bytes(paths["totals"]),
+        file_name="call_totals.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        disabled=not paths["totals"].exists(),
+        key="dl_totals",
+    )
+    cols[2].download_button(
+        "⬇ audit_report.txt",
+        data=_read_bytes(paths["audit"]),
+        file_name="audit_report.txt",
+        mime="text/plain",
+        disabled=not paths["audit"].exists(),
+        key="dl_audit",
+    )
+
+
+def _render_audit_view(result: dict) -> None:
+    audit = result["audit_data"]
+    errors = audit.get("errors", [])
+    warnings = audit.get("warnings", [])
+    fairness = audit.get("fairness_summary", {})
+    unassigned = result.get("unassigned_rows", [])
+    avoid_assigns = audit.get("avoid_assignments", [])
+
+    with st.expander(
+        f"Errors ({len(errors)})" if errors else "Errors",
+        expanded=bool(errors),
+    ):
+        if errors:
+            for msg in errors:
+                st.error(msg)
+        else:
+            st.success("No errors ✓")
+
+    with st.expander(f"Warnings ({len(warnings)})", expanded=False):
+        if warnings:
+            for msg in warnings:
+                st.warning(msg)
+        else:
+            st.caption("No warnings.")
+
+    with st.expander("Fairness summary", expanded=True):
+        # Group the 7 keys * 3 stats from fairness_summary into a tidy
+        # min/max/diff table by metric prefix.
+        rows = []
+        seen = set()
+        for key in fairness:
+            if key.endswith("_diff") or key.endswith("_min") or key.endswith("_max"):
+                base = key.rsplit("_", 1)[0]
+                seen.add(base)
+        for base in sorted(seen):
+            rows.append({
+                "metric": base,
+                "min": fairness.get(f"{base}_min", ""),
+                "max": fairness.get(f"{base}_max", ""),
+                "diff": fairness.get(f"{base}_diff", ""),
+            })
+        if rows:
+            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        else:
+            st.caption("No fairness data.")
+
+    with st.expander(
+        f"Unassigned slots ({len(unassigned)})" if unassigned else "Unassigned slots",
+        expanded=bool(unassigned),
+    ):
+        if unassigned:
+            df = pd.DataFrame(unassigned)
+            st.dataframe(df, hide_index=True, use_container_width=True)
+        else:
+            st.success("All required slots assigned ✓")
+
+    with st.expander(f"Avoid-rotation assignments ({len(avoid_assigns)})", expanded=False):
+        if avoid_assigns:
+            df = pd.DataFrame(
+                [
+                    {"date": d.isoformat() if hasattr(d, "isoformat") else d,
+                     "resident": resident, "rotation": rotation, "slot": slot}
+                    for d, resident, rotation, slot in avoid_assigns
+                ]
+            )
+            st.dataframe(df, hide_index=True, use_container_width=True)
+        else:
+            st.caption("No AVOID-rotation assignments.")
+
+    with st.expander("Run metadata", expanded=False):
+        meta = {
+            "seed": audit.get("seed"),
+            "tiebreaker_count": audit.get("tiebreaker_count"),
+            "swap_improvements": audit.get("swap_improvements"),
+            "monte_carlo_score_order": audit.get("monte_carlo_score_order"),
+            "pick_candidate_rank_order": audit.get("pick_candidate_rank_order"),
+            "pick_candidate_weights": audit.get("pick_candidate_weights"),
+            "intern_block1_weekday_calls": audit.get("intern_block1_weekday_calls"),
+            "block1_end": audit.get("block1_end"),
+            "restart_date": audit.get("restart_date"),
+            "completed_call_count": audit.get("completed_call_count"),
+        }
+        st.json(meta)
+
+
+def _totals_dataframe(residents: dict) -> pd.DataFrame:
+    rows = []
+    for name, r in residents.items():
+        rows.append({
+            "name": name,
+            "pgy": r.get("pgy"),
+            "total_calls": r.get("total_calls", 0),
+            "weekday_calls": r.get("weekday_calls", 0),
+            "weekend_calls": r.get("weekend_calls", 0),
+            "Jul_Dec_calls": r.get("Jul_Dec_calls", 0),
+            "Jan_Jun_calls": r.get("Jan_Jun_calls", 0),
+        })
+    return pd.DataFrame(rows)
+
+
+def _render_totals_table(result: dict) -> None:
+    df = _totals_dataframe(result["residents"])
+    if df.empty:
+        st.caption("No residents loaded.")
+        return
+
+    # Totals row (sum of numeric columns) appended at the bottom.
+    sums = df.select_dtypes(include="number").sum(numeric_only=True)
+    totals_row = {col: ("" if col in ("name", "pgy") else int(sums.get(col, 0))) for col in df.columns}
+    totals_row["name"] = "TOTAL"
+    df_with_totals = pd.concat([df, pd.DataFrame([totals_row])], ignore_index=True)
+
+    def _row_style(row):
+        pgy = row.get("pgy")
+        color = _PGY_ROW_COLORS.get(pgy)
+        if row["name"] == "TOTAL":
+            return [
+                "background-color: #EEEEEE; font-weight: bold;" for _ in row
+            ]
+        if color:
+            return [f"background-color: {color};" for _ in row]
+        return ["" for _ in row]
+
+    styler = df_with_totals.style.apply(_row_style, axis=1)
+    st.dataframe(styler, hide_index=True, use_container_width=True)
+
+
+def _schedule_dataframe(result: dict) -> pd.DataFrame:
+    """Build the schedule view. Mirrors call_schedule.xlsx columns.
+
+    One row per calendar day with Block / Date / Day / Upper level /
+    Intern / No Call columns, matching how the user sees the schedule
+    in Excel.
+    """
+    schedule_rows = result["schedule_rows"]
+    lookup = result["lookup"]
+    no_call = result["no_call"]
+    holidays = result["holidays"]
+    residents = result["residents"]
+
+    intern_names = [n for n, r in residents.items() if r.get("pgy") == 1]
+    nf_name = str(st.session_state.config.get("NIGHT_FLOAT_ROTATION_NAME", "NF"))
+
+    by_date: dict[date, dict] = {}
+    completed_dates: set[date] = set()
+    for r in schedule_rows:
+        d = date.fromisoformat(r["date"])
+        slot = r["slot"]
+        name = (r.get("resident") or "").strip()
+        rec = by_date.setdefault(d, {"upper": "", "intern_weekend": "", "intern_weekday": ""})
+        if slot in ("UPPER_WEEKDAY", "UPPER_WEEKEND"):
+            rec["upper"] = name
+        elif slot == "INTERN_WEEKEND":
+            rec["intern_weekend"] = name
+        elif slot == "INTERN_WEEKDAY":
+            rec["intern_weekday"] = name
+        if r.get("note") == "COMPLETED":
+            completed_dates.add(d)
+
+    date_to_block: dict[date, int] = {}
+    for i, block in enumerate(lookup.blocks, start=1):
+        cur = block.start
+        while cur <= block.end:
+            date_to_block[cur] = i
+            cur += timedelta(days=1)
+
+    rows = []
+    for d in sorted(by_date.keys()):
+        upper = by_date[d]["upper"]
+        if d.weekday() >= 5:
+            intern_val = by_date[d]["intern_weekend"] or "0"
+        else:
+            intern_weekday = by_date[d].get("intern_weekday", "")
+            if intern_weekday:
+                intern_val = intern_weekday
+            else:
+                nf_interns = [
+                    name for name in intern_names
+                    if lookup.rotation_on_date(name, d) == nf_name
+                ]
+                intern_val = ", ".join(sorted(nf_interns)) if nf_interns else "0"
+
+        no_call_entries = []
+        for name, days in no_call.items():
+            if d in days:
+                reason = days[d]
+                no_call_entries.append(f"{name} ({reason})" if reason else name)
+
+        if d in holidays:
+            note = "HOLIDAY"
+        elif d in completed_dates:
+            note = "COMPLETED"
+        elif not upper or (d.weekday() >= 5 and not by_date[d]["intern_weekend"]):
+            note = "UNASSIGNED"
+        else:
+            note = ""
+
+        rows.append({
+            "Block": date_to_block.get(d, ""),
+            "Date": d.isoformat(),
+            "Day": d.strftime("%a"),
+            "Upper level": upper,
+            "Intern": intern_val,
+            "No Call": ", ".join(sorted(no_call_entries)),
+            "_month": d.strftime("%B"),
+            "_weekend": d.weekday() >= 5,
+            "_note": note,
+        })
+    return pd.DataFrame(rows)
+
+
+def _render_schedule_table(result: dict) -> None:
+    df = _schedule_dataframe(result)
+    if df.empty:
+        st.caption("No schedule rows.")
+        return
+
+    months_present = list(dict.fromkeys(df["_month"].tolist()))
+    residents_present = sorted(
+        {x for x in df["Upper level"].tolist() if x and x != "0"}
+        | {x for x in df["Intern"].tolist() if x and x not in ("0",)}
+    )
+
+    cols = st.columns([1, 1, 1, 1])
+    month = cols[0].selectbox("Month", ["All"] + months_present, key="sched_month")
+    resident = cols[1].selectbox("Resident", ["All"] + residents_present, key="sched_resident")
+    notes_only = cols[2].checkbox("Notes only (HOLIDAY/COMPLETED/UNASSIGNED)", key="sched_notes_only")
+    cols[3].caption(f"{len(df)} total rows")
+
+    view = df.copy()
+    if month != "All":
+        view = view[view["_month"] == month]
+    if resident != "All":
+        view = view[(view["Upper level"] == resident) | (view["Intern"].str.contains(resident, na=False))]
+    if notes_only:
+        view = view[view["_note"] != ""]
+
+    visible_cols = ["Block", "Date", "Day", "Upper level", "Intern", "No Call"]
+    display = view[visible_cols + ["_weekend", "_note"]].reset_index(drop=True)
+
+    def _row_style(row):
+        note = row["_note"]
+        if note == "UNASSIGNED":
+            return ["background-color: #F4CCCC;" for _ in row]
+        if note == "HOLIDAY":
+            return ["background-color: #CFE2F3;" for _ in row]
+        if note == "COMPLETED":
+            return ["background-color: #EBEBEB;" for _ in row]
+        if row["_weekend"]:
+            return ["background-color: #FFF2CC;" for _ in row]
+        return ["" for _ in row]
+
+    styler = display.style.apply(_row_style, axis=1).hide(axis="columns", subset=["_weekend", "_note"])
+    st.dataframe(styler, hide_index=True, use_container_width=True, height=560)
+
+
+def _render_results_section() -> None:
+    state = st.session_state.get("run_state", "idle")
+    result = st.session_state.get("last_result")
+    if state == "running":
+        st.info("Generating new schedule…")
+        return
+    if result is None:
+        st.caption("Run a schedule above to see results here.")
+        return
+
+    _render_status_banner(result)
+    _render_downloads()
+
+    with st.expander("Audit", expanded=True):
+        _render_audit_view(result)
+    with st.expander("Call totals", expanded=True):
+        _render_totals_table(result)
+    with st.expander("Call schedule", expanded=True):
+        _render_schedule_table(result)
+
+
+# ---------------------------------------------------------------------------
 # Page
 # ---------------------------------------------------------------------------
 
@@ -918,6 +1652,9 @@ def _render_settings_section() -> tuple[bool, list[str]]:
 def main() -> None:
     st.set_page_config(page_title="Call Schedule Creator", layout="wide")
     _init_session_state()
+    # Drain progress/log/done events from the background thread BEFORE
+    # rendering any section, so the Run section sees the freshest state.
+    _drain_queue()
 
     header_cols = st.columns([6, 1])
     header_cols[0].title("Call Schedule Creator")
@@ -925,28 +1662,27 @@ def main() -> None:
         _reset_session()
         st.rerun()
 
-    with st.expander("1. Upload input files", expanded=True):
+    with st.expander("1. Upload input files", expanded=False):
         for slot in UPLOAD_SLOTS:
             _render_upload_slot(slot)
 
-    with st.expander("2. Settings", expanded=True):
+    with st.expander("2. Settings", expanded=False):
         settings_has_errors, soft_warnings = _render_settings_section()
 
     with st.expander("3. Run schedule", expanded=False):
         uploads_ready = _all_required_valid()
-        if not uploads_ready:
-            st.warning("Upload all required files above before running.")
-        if settings_has_errors:
-            st.error("Fix the validation errors in Settings before running.")
-        if soft_warnings:
-            with st.expander(f"Configuration warnings ({len(soft_warnings)})", expanded=False):
-                for w in soft_warnings:
-                    st.warning(w)
-        run_disabled = not uploads_ready or settings_has_errors
-        st.button("Run (coming in Phase 5c)", disabled=run_disabled or True)
+        _render_run_section(uploads_ready, settings_has_errors, soft_warnings)
 
     with st.expander("4. Results", expanded=False):
-        st.caption("Results will appear here after a run completes — Phase 5c.")
+        _render_results_section()
+
+    # Live-progress tick: while a run is in flight, sleep briefly and
+    # rerun so the next pass picks up new queue events. Decision in
+    # handoff option (a) — no extra dep, keeps the page responsive
+    # enough at ~2.5 reruns/sec.
+    if st.session_state.get("run_state") == "running":
+        time.sleep(RUN_POLL_INTERVAL_SEC)
+        st.rerun()
 
 
 if __name__ == "__main__":
