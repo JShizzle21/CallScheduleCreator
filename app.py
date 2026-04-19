@@ -22,7 +22,7 @@ import tempfile
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -504,6 +504,73 @@ def _load_defaults_fresh() -> dict:
         return {}
 
 
+def _sync_cfg_from_widgets(cfg: dict) -> None:
+    """Mirror the current widget state from session_state into cfg.
+
+    On rerun, st.session_state[w_KEY] already holds the user's latest
+    widget value before our script runs. Pulling these values into cfg
+    BEFORE computing the ● diff markers and hard-error list is essential:
+    without this, validation and markers lag by one rerun (they'd see
+    the prior rerun's final cfg, not the widget state that just changed).
+    Widgets still write back to cfg during render, but that second write
+    is a no-op once sync has already happened.
+    """
+
+    def _get(wk, default=None):
+        return st.session_state.get(wk, default)
+
+    start = _get("w_ACADEMIC_DATE_START_STRING")
+    if isinstance(start, date):
+        cfg["ACADEMIC_DATE_START_STRING"] = start.isoformat()
+
+    end = _get("w_ACADEMIC_DATE_END_STRING")
+    if isinstance(end, date):
+        cfg["ACADEMIC_DATE_END_STRING"] = end.isoformat()
+
+    # PGY3 cutoff is gated by a checkbox. If the checkbox has ever
+    # rendered we trust it; otherwise keep whatever cfg already has.
+    if "cb_PGY3_CUTOFF_DATE" in st.session_state:
+        if st.session_state["cb_PGY3_CUTOFF_DATE"]:
+            dp = st.session_state.get("dp_PGY3_CUTOFF_DATE")
+            if isinstance(dp, date):
+                cfg["PGY3_CUTOFF_DATE"] = dp.isoformat()
+        else:
+            cfg["PGY3_CUTOFF_DATE"] = ""
+
+    for key in (
+        "SIMULATION_RUNS",
+        "POST_CALL_DAYS",
+        "MIN_SPACING_DAYS_STRONG",
+        "MIN_SPACING_DAYS_MILD",
+        "MAX_CALLS_IN_WINDOW",
+        "ROLLING_WINDOW_DAYS",
+        "MAX_DIFF_SOFT",
+        "MAX_DIFF_HARD",
+    ):
+        v = _get(f"w_{key}")
+        if v is not None:
+            cfg[key] = int(v)
+
+    for key in ("USE_COMPLETED_CALLS", "INTERN_BLOCK1_WEEKDAY_CALLS"):
+        v = _get(f"w_{key}")
+        if v is not None:
+            cfg[key] = int(bool(v))
+
+    nf = _get("w_NIGHT_FLOAT_ROTATION_NAME")
+    if nf is not None:
+        cfg["NIGHT_FLOAT_ROTATION_NAME"] = str(nf)
+
+    for key in WEIGHT_KEYS:
+        v = _get(f"w_{key}")
+        if v is not None:
+            cfg[key] = float(v)
+
+    for key in ("PICK_CANDIDATE_RANK_ORDER", "MONTE_CARLO_SCORE_ORDER"):
+        v = _get(f"w_{key}")
+        if v is not None:
+            cfg[key] = [ln.strip() for ln in str(v).splitlines() if ln.strip()]
+
+
 def _diff_marker(key: str, defaults: dict) -> str:
     return " ●" if st.session_state.config.get(key) != defaults.get(key) else ""
 
@@ -517,11 +584,22 @@ def _render_errors(key: str, errors_by_key: dict[str, list[str]]) -> None:
         st.error(msg)
 
 
-def _date_input_nullable(label: str, key: str, value_raw: str, help_text: str) -> str:
-    """Nullable date input. Returns ISO string, or '' if cleared."""
+def _date_input_nullable(
+    label: str,
+    key: str,
+    value_raw: str,
+    help_text: str,
+    fallback_date: date,
+) -> str:
+    """Nullable date input. Returns ISO string, or '' if cleared.
+
+    The checkbox gates the picker because st.date_input can't itself be
+    "blank" once edited. `fallback_date` is used only on the very first
+    render when cfg is empty and no prior dp_* session_state exists —
+    once the user picks a date, Streamlit's session_state persists it
+    across uncheck/recheck cycles.
+    """
     current = _parse_date_or_none(value_raw)
-    # A checkbox gates the picker because st.date_input cannot itself be "blank"
-    # once edited. Clearing the checkbox means "no cutoff".
     enabled = st.checkbox(
         f"Enable {label.lower()}",
         value=current is not None,
@@ -532,7 +610,7 @@ def _date_input_nullable(label: str, key: str, value_raw: str, help_text: str) -
         return ""
     picked = st.date_input(
         label,
-        value=current or date.today(),
+        value=current or fallback_date,
         key=f"dp_{key}",
         label_visibility="collapsed",
     )
@@ -549,7 +627,7 @@ def _render_common_section(defaults: dict, errors: dict[str, list[str]]) -> None
     start_picked = st.date_input(
         _label("ACADEMIC_DATE_START_STRING", "Academic year start", defaults),
         value=start_current,
-        key="w_start",
+        key="w_ACADEMIC_DATE_START_STRING",
         help="First day of the academic year. All scheduling begins from this date.",
     )
     cfg["ACADEMIC_DATE_START_STRING"] = start_picked.isoformat() if start_picked else ""
@@ -560,18 +638,25 @@ def _render_common_section(defaults: dict, errors: dict[str, list[str]]) -> None
     end_picked = st.date_input(
         _label("ACADEMIC_DATE_END_STRING", "Academic year end", defaults),
         value=end_current,
-        key="w_end",
+        key="w_ACADEMIC_DATE_END_STRING",
         help="Last day of the academic year (inclusive).",
     )
     cfg["ACADEMIC_DATE_END_STRING"] = end_picked.isoformat() if end_picked else ""
     _render_errors("ACADEMIC_DATE_END_STRING", errors)
 
+    # Fallback for PGY3 cutoff when enabling from empty: 14 days before
+    # academic end. Avoids defaulting to today (which is out of range).
+    end_for_fallback = _parse_date_or_none(cfg.get("ACADEMIC_DATE_END_STRING"))
+    pgy3_fallback = (
+        end_for_fallback - timedelta(days=14) if end_for_fallback else date.today()
+    )
     cfg["PGY3_CUTOFF_DATE"] = _date_input_nullable(
         _label("PGY3_CUTOFF_DATE", "PGY3 graduation cutoff", defaults),
         "PGY3_CUTOFF_DATE",
         str(cfg.get("PGY3_CUTOFF_DATE", "")),
         "PGY3s are excluded from call on this date and after. "
         "Disable to keep PGY3s eligible all year.",
+        fallback_date=pgy3_fallback,
     )
     _render_errors("PGY3_CUTOFF_DATE", errors)
 
@@ -582,7 +667,7 @@ def _render_common_section(defaults: dict, errors: dict[str, list[str]]) -> None
             max_value=100000,
             value=int(cfg.get("SIMULATION_RUNS", 1000)),
             step=100,
-            key="w_sim_runs",
+            key="w_SIMULATION_RUNS",
             help="More runs = better schedule but slower. 1000 is usually sufficient.",
         )
     )
@@ -592,7 +677,7 @@ def _render_common_section(defaults: dict, errors: dict[str, list[str]]) -> None
         st.toggle(
             _label("USE_COMPLETED_CALLS", "Partial-year mode (seed from completed calls)", defaults),
             value=bool(int(cfg.get("USE_COMPLETED_CALLS", 0))),
-            key="w_use_completed",
+            key="w_USE_COMPLETED_CALLS",
             help="ON: seed from completed_calls.xlsx and generate from the next day. "
             "OFF: generate a full year from scratch.",
         )
@@ -603,7 +688,7 @@ def _render_common_section(defaults: dict, errors: dict[str, list[str]]) -> None
         st.toggle(
             _label("INTERN_BLOCK1_WEEKDAY_CALLS", "Interns take weekday calls in Block 1", defaults),
             value=bool(int(cfg.get("INTERN_BLOCK1_WEEKDAY_CALLS", 1))),
-            key="w_intern_b1",
+            key="w_INTERN_BLOCK1_WEEKDAY_CALLS",
             help="ON: interns cover weekday and weekend calls in Block 1. "
             "OFF: weekday calls in Block 1 are covered by Night Float.",
         )
@@ -646,7 +731,7 @@ def _render_advanced_section(defaults: dict, errors: dict[str, list[str]]) -> No
     cfg["NIGHT_FLOAT_ROTATION_NAME"] = st.text_input(
         _label("NIGHT_FLOAT_ROTATION_NAME", "Night Float rotation code", defaults),
         value=str(cfg.get("NIGHT_FLOAT_ROTATION_NAME", "NF")),
-        key="w_nf_name",
+        key="w_NIGHT_FLOAT_ROTATION_NAME",
         help="The exact name used for Night Float in the flow sheet (e.g. 'NF').",
     )
     _render_errors("NIGHT_FLOAT_ROTATION_NAME", errors)
@@ -805,6 +890,10 @@ def _render_settings_header(defaults: dict, hard_errors: dict[str, list[str]]) -
 def _render_settings_section() -> tuple[bool, list[str]]:
     """Render the whole Settings expander. Returns (hard_errors_exist, soft_warnings)."""
     defaults = _load_defaults_fresh()
+    # Sync widget state → cfg BEFORE computing markers and errors so both
+    # reflect the user's most recent interaction, not the prior rerun's
+    # final cfg. Without this, markers and inline errors lag by one rerun.
+    _sync_cfg_from_widgets(st.session_state.config)
     hard_errors = _compute_hard_errors(st.session_state.config)
 
     _render_settings_header(defaults, hard_errors)
