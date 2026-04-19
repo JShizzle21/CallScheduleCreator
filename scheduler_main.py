@@ -5,10 +5,11 @@ import concurrent.futures
 import logging
 import random
 import sys
+import threading
 import time
 from datetime import date, datetime, timedelta
 from functools import partial
-from typing import Dict, List, Tuple, Optional
+from typing import Callable, Dict, List, Tuple, Optional
 
 from config import CONFIG, load_default_config
 from data_bundle import DataBundle, load_data_bundle
@@ -1260,6 +1261,8 @@ def run_simulation(
     config: dict,
     paths: dict,
     completed_assignments=None,
+    progress_callback: Optional[Callable[[int, int, dict], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
 ):
     # Apply config in the driver process too — format_monte_carlo_score reads
     # MONTE_CARLO_SCORE_ORDER from module globals, and workers' results come
@@ -1276,12 +1279,35 @@ def run_simulation(
         completed_assignments=completed_assignments or [],
     )
 
+    cancelled = False
     with concurrent.futures.ProcessPoolExecutor() as executor:
         futures = {executor.submit(worker, seed): seed for seed in range(num_runs)}
         for future in concurrent.futures.as_completed(futures):
             seed, score = future.result()
             seed_scores.append((seed, score))
             logger.info(f"[{len(seed_scores)}/{num_runs}] seed={seed} | {format_monte_carlo_score(score)}")
+
+            if progress_callback is not None:
+                best_seed_so_far, best_score_so_far = min(seed_scores, key=lambda x: x[1])
+                progress_callback(
+                    len(seed_scores),
+                    num_runs,
+                    {
+                        "seed": seed,
+                        "score": score,
+                        "best_seed": best_seed_so_far,
+                        "best_score": best_score_so_far,
+                    },
+                )
+
+            if cancel_event is not None and cancel_event.is_set():
+                cancelled = True
+                executor.shutdown(wait=False, cancel_futures=True)
+                break
+
+    if cancelled:
+        logger.info("Simulation cancelled.")
+        return None
 
     best_seed, best_score = min(seed_scores, key=lambda x: x[1])
     best_result = generate_schedule_once(
