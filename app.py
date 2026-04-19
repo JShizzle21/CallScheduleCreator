@@ -20,17 +20,77 @@ from __future__ import annotations
 import shutil
 import tempfile
 import time
+from collections import defaultdict
 from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
 from typing import Callable, Optional
 
 import streamlit as st
 from openpyxl import load_workbook
 
-from config import load_default_config
+from config import load_default_config, save_config
 
 TMPDIR_PREFIX = "CallScheduler_"
 ORPHAN_AGE_SECONDS = 24 * 3600
+
+# Fixed allowed sets for the two lexicographic-order fields. The user may
+# reorder but not add or remove items — the scheduler requires exactly these.
+ALLOWED_MC_SCORE_ORDER = {
+    "errors",
+    "unassigned",
+    "upper_weekend_diff",
+    "upper_weekday_diff",
+    "pgy2_total_diff",
+    "pgy3_total_diff",
+    "intern_weekend_diff",
+    "avoid_assignments",
+    "warnings",
+}
+ALLOWED_PICK_RANK_ORDER = {
+    "hard_diff_flag",
+    "soft_diff_flag",
+    "weighted_score",
+}
+
+# Keys that the Settings section exposes to the user. Path keys and SHEET_NAME
+# are intentionally omitted — they're managed by the Upload section.
+BEHAVIOR_KEYS = [
+    # Common
+    "ACADEMIC_DATE_START_STRING",
+    "ACADEMIC_DATE_END_STRING",
+    "PGY3_CUTOFF_DATE",
+    "SIMULATION_RUNS",
+    "USE_COMPLETED_CALLS",
+    "INTERN_BLOCK1_WEEKDAY_CALLS",
+    # Advanced
+    "POST_CALL_DAYS",
+    "MIN_SPACING_DAYS_STRONG",
+    "MIN_SPACING_DAYS_MILD",
+    "MAX_CALLS_IN_WINDOW",
+    "ROLLING_WINDOW_DAYS",
+    "MAX_DIFF_SOFT",
+    "MAX_DIFF_HARD",
+    "NIGHT_FLOAT_ROTATION_NAME",
+    # Expert
+    "FAIRNESS_GAP_WEIGHT",
+    "SPACING_WEIGHT",
+    "AVOID_WEIGHT",
+    "YEAR_BIAS_WEIGHT",
+    "PACE_WEIGHT",
+    "LOOKAHEAD_WEIGHT",
+    "PICK_CANDIDATE_RANK_ORDER",
+    "MONTE_CARLO_SCORE_ORDER",
+]
+
+WEIGHT_KEYS = [
+    "FAIRNESS_GAP_WEIGHT",
+    "SPACING_WEIGHT",
+    "AVOID_WEIGHT",
+    "YEAR_BIAS_WEIGHT",
+    "PACE_WEIGHT",
+    "LOOKAHEAD_WEIGHT",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +340,488 @@ def _all_required_valid() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Settings — validation
+# ---------------------------------------------------------------------------
+
+
+def _parse_date_or_none(raw) -> Optional[date]:
+    """Return a date for a string or date; None if raw is empty/unparseable."""
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, date):
+        return raw
+    try:
+        return date.fromisoformat(str(raw))
+    except ValueError:
+        return None
+
+
+def _is_blank_date(raw) -> bool:
+    return raw is None or raw == ""
+
+
+def _compute_hard_errors(cfg: dict) -> dict[str, list[str]]:
+    """Return {key: [messages]} for any hard validation failures.
+
+    Hard errors block the Run button (see §4.6 of docs/gui_plan.md).
+    """
+    errs: dict[str, list[str]] = defaultdict(list)
+
+    start_raw = cfg.get("ACADEMIC_DATE_START_STRING", "")
+    end_raw = cfg.get("ACADEMIC_DATE_END_STRING", "")
+    cutoff_raw = cfg.get("PGY3_CUTOFF_DATE", "")
+
+    start = _parse_date_or_none(start_raw)
+    end = _parse_date_or_none(end_raw)
+    cutoff = _parse_date_or_none(cutoff_raw)
+
+    if start is None:
+        errs["ACADEMIC_DATE_START_STRING"].append("Academic year start is not a valid date.")
+    if end is None:
+        errs["ACADEMIC_DATE_END_STRING"].append("Academic year end is not a valid date.")
+    if start and end and end <= start:
+        errs["ACADEMIC_DATE_END_STRING"].append(
+            "Academic year end must be after academic year start."
+        )
+
+    if not _is_blank_date(cutoff_raw):
+        if cutoff is None:
+            errs["PGY3_CUTOFF_DATE"].append("PGY3 cutoff is not a valid date.")
+        elif start and end and not (start <= cutoff <= end):
+            errs["PGY3_CUTOFF_DATE"].append(
+                "PGY3 cutoff must be between the academic start and end dates "
+                "(leave blank to disable)."
+            )
+
+    if int(cfg.get("SIMULATION_RUNS", 0)) < 1:
+        errs["SIMULATION_RUNS"].append("Simulation runs must be at least 1.")
+
+    for key in (
+        "POST_CALL_DAYS",
+        "MIN_SPACING_DAYS_STRONG",
+        "MIN_SPACING_DAYS_MILD",
+        "MAX_CALLS_IN_WINDOW",
+        "ROLLING_WINDOW_DAYS",
+        "MAX_DIFF_SOFT",
+        "MAX_DIFF_HARD",
+    ):
+        if int(cfg.get(key, 0)) < 0:
+            errs[key].append(f"{key} cannot be negative.")
+
+    for key in WEIGHT_KEYS:
+        if float(cfg.get(key, 0)) < 0:
+            errs[key].append(f"{key} cannot be negative.")
+
+    if int(cfg.get("MAX_DIFF_HARD", 0)) < int(cfg.get("MAX_DIFF_SOFT", 0)):
+        errs["MAX_DIFF_HARD"].append("Hard threshold must be ≥ soft threshold.")
+
+    if int(cfg.get("MIN_SPACING_DAYS_MILD", 0)) < int(cfg.get("MIN_SPACING_DAYS_STRONG", 0)):
+        errs["MIN_SPACING_DAYS_MILD"].append("Mild spacing must be ≥ strong spacing.")
+
+    if not str(cfg.get("NIGHT_FLOAT_ROTATION_NAME", "")).strip():
+        errs["NIGHT_FLOAT_ROTATION_NAME"].append("Night Float rotation name cannot be blank.")
+
+    mc = cfg.get("MONTE_CARLO_SCORE_ORDER")
+    if not isinstance(mc, list) or set(mc) != ALLOWED_MC_SCORE_ORDER or len(mc) != len(set(mc)):
+        errs["MONTE_CARLO_SCORE_ORDER"].append(
+            f"Must list exactly these items once each (any order, one per line): "
+            f"{', '.join(sorted(ALLOWED_MC_SCORE_ORDER))}."
+        )
+
+    pick = cfg.get("PICK_CANDIDATE_RANK_ORDER")
+    if not isinstance(pick, list) or set(pick) != ALLOWED_PICK_RANK_ORDER or len(pick) != len(set(pick)):
+        errs["PICK_CANDIDATE_RANK_ORDER"].append(
+            f"Must list exactly these items once each (any order, one per line): "
+            f"{', '.join(sorted(ALLOWED_PICK_RANK_ORDER))}."
+        )
+
+    return dict(errs)
+
+
+def _compute_soft_warnings(cfg: dict) -> list[str]:
+    """Return a list of soft-warning messages (§4.6). Do not block Run."""
+    warnings: list[str] = []
+
+    start = _parse_date_or_none(cfg.get("ACADEMIC_DATE_START_STRING"))
+    end = _parse_date_or_none(cfg.get("ACADEMIC_DATE_END_STRING"))
+    if start and end:
+        duration = (end - start).days
+        if duration < 300 or duration > 400:
+            warnings.append(
+                f"Academic year is {duration} days. Typical value is ~365."
+            )
+        cutoff = _parse_date_or_none(cfg.get("PGY3_CUTOFF_DATE"))
+        if cutoff is not None and (end - cutoff).days > 45:
+            warnings.append(
+                f"PGY3s will be excluded for {(end - cutoff).days} days. "
+                "That may strain PGY2 coverage."
+            )
+
+    runs = int(cfg.get("SIMULATION_RUNS", 0))
+    if runs > 5000:
+        warnings.append(
+            "Simulation runs > 5000 — expect several minutes. "
+            "Consider the Quick preview button if iterating."
+        )
+    elif 0 < runs < 100:
+        warnings.append(
+            "Low simulation run count may produce suboptimal schedules. "
+            "1000 is the tuned default."
+        )
+
+    if int(cfg.get("POST_CALL_DAYS", 0)) == 0:
+        warnings.append(
+            "Post-call rest days = 0 — residents could be assigned on consecutive days."
+        )
+
+    if int(cfg.get("MAX_CALLS_IN_WINDOW", 0)) == 0:
+        warnings.append(
+            "Rolling-window cap disabled — burst patterns (multiple calls within a short span) "
+            "will not be prevented."
+        )
+
+    for key in WEIGHT_KEYS:
+        val = float(cfg.get(key, 0))
+        if val == 0:
+            warnings.append(f"{key} is 0 — this component will be ignored during candidate ranking.")
+        elif val > 10:
+            warnings.append(f"{key} is {val} — far above the default. This component will dominate ranking.")
+
+    return warnings
+
+
+# ---------------------------------------------------------------------------
+# Settings — widget rendering
+# ---------------------------------------------------------------------------
+
+
+def _load_defaults_fresh() -> dict:
+    """Re-read config.yaml from disk each rerun for live ● diff comparisons."""
+    try:
+        cfg, _paths = load_default_config()
+        return cfg
+    except Exception:
+        return {}
+
+
+def _diff_marker(key: str, defaults: dict) -> str:
+    return " ●" if st.session_state.config.get(key) != defaults.get(key) else ""
+
+
+def _label(key: str, text: str, defaults: dict) -> str:
+    return f"{text}{_diff_marker(key, defaults)}"
+
+
+def _render_errors(key: str, errors_by_key: dict[str, list[str]]) -> None:
+    for msg in errors_by_key.get(key, []):
+        st.error(msg)
+
+
+def _date_input_nullable(label: str, key: str, value_raw: str, help_text: str) -> str:
+    """Nullable date input. Returns ISO string, or '' if cleared."""
+    current = _parse_date_or_none(value_raw)
+    # A checkbox gates the picker because st.date_input cannot itself be "blank"
+    # once edited. Clearing the checkbox means "no cutoff".
+    enabled = st.checkbox(
+        f"Enable {label.lower()}",
+        value=current is not None,
+        key=f"cb_{key}",
+        help=help_text,
+    )
+    if not enabled:
+        return ""
+    picked = st.date_input(
+        label,
+        value=current or date.today(),
+        key=f"dp_{key}",
+        label_visibility="collapsed",
+    )
+    return picked.isoformat() if picked else ""
+
+
+def _render_common_section(defaults: dict, errors: dict[str, list[str]]) -> None:
+    st.markdown("**Common** — most users only edit these.")
+
+    cfg = st.session_state.config
+
+    start_raw = str(cfg.get("ACADEMIC_DATE_START_STRING", ""))
+    start_current = _parse_date_or_none(start_raw) or date.today()
+    start_picked = st.date_input(
+        _label("ACADEMIC_DATE_START_STRING", "Academic year start", defaults),
+        value=start_current,
+        key="w_start",
+        help="First day of the academic year. All scheduling begins from this date.",
+    )
+    cfg["ACADEMIC_DATE_START_STRING"] = start_picked.isoformat() if start_picked else ""
+    _render_errors("ACADEMIC_DATE_START_STRING", errors)
+
+    end_raw = str(cfg.get("ACADEMIC_DATE_END_STRING", ""))
+    end_current = _parse_date_or_none(end_raw) or date.today()
+    end_picked = st.date_input(
+        _label("ACADEMIC_DATE_END_STRING", "Academic year end", defaults),
+        value=end_current,
+        key="w_end",
+        help="Last day of the academic year (inclusive).",
+    )
+    cfg["ACADEMIC_DATE_END_STRING"] = end_picked.isoformat() if end_picked else ""
+    _render_errors("ACADEMIC_DATE_END_STRING", errors)
+
+    cfg["PGY3_CUTOFF_DATE"] = _date_input_nullable(
+        _label("PGY3_CUTOFF_DATE", "PGY3 graduation cutoff", defaults),
+        "PGY3_CUTOFF_DATE",
+        str(cfg.get("PGY3_CUTOFF_DATE", "")),
+        "PGY3s are excluded from call on this date and after. "
+        "Disable to keep PGY3s eligible all year.",
+    )
+    _render_errors("PGY3_CUTOFF_DATE", errors)
+
+    cfg["SIMULATION_RUNS"] = int(
+        st.number_input(
+            _label("SIMULATION_RUNS", "Number of simulation runs", defaults),
+            min_value=1,
+            max_value=100000,
+            value=int(cfg.get("SIMULATION_RUNS", 1000)),
+            step=100,
+            key="w_sim_runs",
+            help="More runs = better schedule but slower. 1000 is usually sufficient.",
+        )
+    )
+    _render_errors("SIMULATION_RUNS", errors)
+
+    cfg["USE_COMPLETED_CALLS"] = int(
+        st.toggle(
+            _label("USE_COMPLETED_CALLS", "Partial-year mode (seed from completed calls)", defaults),
+            value=bool(int(cfg.get("USE_COMPLETED_CALLS", 0))),
+            key="w_use_completed",
+            help="ON: seed from completed_calls.xlsx and generate from the next day. "
+            "OFF: generate a full year from scratch.",
+        )
+    )
+    _render_errors("USE_COMPLETED_CALLS", errors)
+
+    cfg["INTERN_BLOCK1_WEEKDAY_CALLS"] = int(
+        st.toggle(
+            _label("INTERN_BLOCK1_WEEKDAY_CALLS", "Interns take weekday calls in Block 1", defaults),
+            value=bool(int(cfg.get("INTERN_BLOCK1_WEEKDAY_CALLS", 1))),
+            key="w_intern_b1",
+            help="ON: interns cover weekday and weekend calls in Block 1. "
+            "OFF: weekday calls in Block 1 are covered by Night Float.",
+        )
+    )
+    _render_errors("INTERN_BLOCK1_WEEKDAY_CALLS", errors)
+
+
+def _render_advanced_section(defaults: dict, errors: dict[str, list[str]]) -> None:
+    cfg = st.session_state.config
+
+    def _num(key: str, label: str, help_text: str, step: int = 1, min_value: int = 0):
+        cfg[key] = int(
+            st.number_input(
+                _label(key, label, defaults),
+                min_value=min_value,
+                value=int(cfg.get(key, 0)),
+                step=step,
+                key=f"w_{key}",
+                help=help_text,
+            )
+        )
+        _render_errors(key, errors)
+
+    _num("POST_CALL_DAYS", "Post-call rest days",
+         "Minimum days off after a call before another can be assigned. Hard constraint.")
+    _num("MIN_SPACING_DAYS_STRONG", "Strong spacing threshold (days)",
+         "Calls within this many days incur a strong penalty (soft — not hard-blocked).",
+         min_value=1)
+    _num("MIN_SPACING_DAYS_MILD", "Mild spacing threshold (days)",
+         "Calls within this many days incur a mild penalty.", min_value=1)
+    _num("MAX_CALLS_IN_WINDOW", "Max calls per rolling window",
+         "Rolling cap: no more than this many calls per N days. Set to 0 to disable.")
+    _num("ROLLING_WINDOW_DAYS", "Rolling window (days)",
+         "Size of the rolling window for the cap above.", min_value=1)
+    _num("MAX_DIFF_SOFT", "Soft fairness threshold",
+         "Call-count gap that triggers the soft fairness flag in ranking.", min_value=1)
+    _num("MAX_DIFF_HARD", "Hard fairness threshold",
+         "Call-count gap that triggers the hard fairness flag.", min_value=1)
+
+    cfg["NIGHT_FLOAT_ROTATION_NAME"] = st.text_input(
+        _label("NIGHT_FLOAT_ROTATION_NAME", "Night Float rotation code", defaults),
+        value=str(cfg.get("NIGHT_FLOAT_ROTATION_NAME", "NF")),
+        key="w_nf_name",
+        help="The exact name used for Night Float in the flow sheet (e.g. 'NF').",
+    )
+    _render_errors("NIGHT_FLOAT_ROTATION_NAME", errors)
+
+
+def _render_expert_section(defaults: dict, errors: dict[str, list[str]]) -> None:
+    cfg = st.session_state.config
+
+    st.warning(
+        "⚠️ These values control how the scheduler ranks candidates. They have "
+        "been tuned through Monte Carlo testing. Modifying them may produce "
+        "worse schedules. Change only if you understand the weighted-score "
+        "system — see README §Scoring."
+    )
+
+    def _weight(key: str, label: str, help_text: str):
+        cfg[key] = float(
+            st.number_input(
+                _label(key, label, defaults),
+                min_value=0.0,
+                value=float(cfg.get(key, 0.0)),
+                step=0.25,
+                format="%.2f",
+                key=f"w_{key}",
+                help=help_text,
+            )
+        )
+        _render_errors(key, errors)
+
+    _weight("FAIRNESS_GAP_WEIGHT", "Fairness gap weight",
+            "How strongly to prefer residents behind in call count.")
+    _weight("SPACING_WEIGHT", "Spacing weight",
+            "How strongly to prefer residents with longer spacing since last call.")
+    _weight("AVOID_WEIGHT", "Avoid-rotation weight",
+            "Penalty for assigning call while on an AVOID rotation.")
+    _weight("YEAR_BIAS_WEIGHT", "Year-bias weight",
+            "How strongly to front-load PGY3s and back-load PGY2s.")
+    _weight("PACE_WEIGHT", "Pace weight",
+            "Corrective: penalizes residents ahead of their expected call pace.")
+    _weight("LOOKAHEAD_WEIGHT", "Lookahead weight",
+            "Anticipatory: prefers residents with less remaining eligibility runway.")
+
+    _render_rank_order(
+        key="PICK_CANDIDATE_RANK_ORDER",
+        label="Candidate rank order",
+        help_text=(
+            "Order in which candidate ranking criteria are applied "
+            "(lexicographic, one per line). All items required."
+        ),
+        allowed=ALLOWED_PICK_RANK_ORDER,
+        defaults=defaults,
+        errors=errors,
+    )
+    _render_rank_order(
+        key="MONTE_CARLO_SCORE_ORDER",
+        label="Monte Carlo score order",
+        help_text=(
+            "Order in which schedule-level metrics are prioritized when selecting "
+            "the best Monte Carlo run (one per line). All items required."
+        ),
+        allowed=ALLOWED_MC_SCORE_ORDER,
+        defaults=defaults,
+        errors=errors,
+    )
+
+
+def _render_rank_order(
+    key: str,
+    label: str,
+    help_text: str,
+    allowed: set[str],
+    defaults: dict,
+    errors: dict[str, list[str]],
+) -> None:
+    cfg = st.session_state.config
+    current = cfg.get(key) or []
+    st.caption(f"Required items: {', '.join(sorted(allowed))}")
+    text = st.text_area(
+        _label(key, label, defaults),
+        value="\n".join(current),
+        key=f"w_{key}",
+        height=150,
+        help=help_text,
+    )
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    cfg[key] = lines
+    _render_errors(key, errors)
+
+
+# ---------------------------------------------------------------------------
+# Settings — header (diff count, reset, save)
+# ---------------------------------------------------------------------------
+
+
+def _count_diffs(defaults: dict) -> int:
+    return sum(
+        1
+        for key in BEHAVIOR_KEYS
+        if st.session_state.config.get(key) != defaults.get(key)
+    )
+
+
+@st.dialog("Reset to defaults?")
+def _confirm_reset() -> None:
+    st.write("Discard all your changes and return to the saved defaults in config.yaml?")
+    cols = st.columns(2)
+    if cols[0].button("Yes, reset", type="primary", key="dlg_reset_yes"):
+        fresh, _ = load_default_config()
+        st.session_state.config = fresh
+        # Clear per-widget keys so widgets re-initialise from the fresh config.
+        for k in list(st.session_state.keys()):
+            if k.startswith("w_") or k.startswith("cb_") or k.startswith("dp_"):
+                del st.session_state[k]
+        st.rerun()
+    if cols[1].button("Cancel", key="dlg_reset_no"):
+        st.rerun()
+
+
+@st.dialog("Save as defaults?")
+def _confirm_save(values: dict) -> None:
+    st.write(
+        "Overwrite config.yaml so your current values become the new defaults? "
+        "The baseline will be permanently replaced. Comments in config.yaml are preserved."
+    )
+    cols = st.columns(2)
+    if cols[0].button("Yes, save", type="primary", key="dlg_save_yes"):
+        try:
+            save_config(values)
+            st.success("Defaults saved to config.yaml.")
+        except Exception as exc:
+            st.error(f"Failed to save: {exc}")
+        st.rerun()
+    if cols[1].button("Cancel", key="dlg_save_no"):
+        st.rerun()
+
+
+def _render_settings_header(defaults: dict, hard_errors: dict[str, list[str]]) -> None:
+    cols = st.columns([4, 1, 1])
+    diffs = _count_diffs(defaults)
+    n_errors = sum(len(v) for v in hard_errors.values())
+    msg_bits = []
+    if diffs:
+        msg_bits.append(f"{diffs} value(s) differ from defaults")
+    if n_errors:
+        msg_bits.append(f"**{n_errors} validation error(s) must be fixed**")
+    cols[0].markdown(" · ".join(msg_bits) if msg_bits else "_All values match config.yaml defaults._")
+    if cols[1].button("Reset to defaults", key="btn_reset"):
+        _confirm_reset()
+    # Only allow Save when there are no hard errors — saving an invalid
+    # config would break the CLI too.
+    save_disabled = n_errors > 0
+    if cols[2].button("Save as defaults", key="btn_save", disabled=save_disabled):
+        _confirm_save({k: st.session_state.config[k] for k in BEHAVIOR_KEYS})
+
+
+def _render_settings_section() -> tuple[bool, list[str]]:
+    """Render the whole Settings expander. Returns (hard_errors_exist, soft_warnings)."""
+    defaults = _load_defaults_fresh()
+    hard_errors = _compute_hard_errors(st.session_state.config)
+
+    _render_settings_header(defaults, hard_errors)
+
+    st.divider()
+    with st.container():
+        _render_common_section(defaults, hard_errors)
+    with st.expander("Advanced", expanded=False):
+        _render_advanced_section(defaults, hard_errors)
+    with st.expander("Expert — tuned values, modify with caution", expanded=False):
+        _render_expert_section(defaults, hard_errors)
+
+    soft = _compute_soft_warnings(st.session_state.config)
+    return bool(hard_errors), soft
+
+
+# ---------------------------------------------------------------------------
 # Page
 # ---------------------------------------------------------------------------
 
@@ -298,14 +840,21 @@ def main() -> None:
         for slot in UPLOAD_SLOTS:
             _render_upload_slot(slot)
 
-    with st.expander("2. Settings", expanded=False):
-        st.info("Settings panel — coming in Phase 5b.")
+    with st.expander("2. Settings", expanded=True):
+        settings_has_errors, soft_warnings = _render_settings_section()
 
     with st.expander("3. Run schedule", expanded=False):
-        ready = _all_required_valid()
-        if not ready:
+        uploads_ready = _all_required_valid()
+        if not uploads_ready:
             st.warning("Upload all required files above before running.")
-        st.button("Run (coming in Phase 5c)", disabled=True)
+        if settings_has_errors:
+            st.error("Fix the validation errors in Settings before running.")
+        if soft_warnings:
+            with st.expander(f"Configuration warnings ({len(soft_warnings)})", expanded=False):
+                for w in soft_warnings:
+                    st.warning(w)
+        run_disabled = not uploads_ready or settings_has_errors
+        st.button("Run (coming in Phase 5c)", disabled=run_disabled or True)
 
     with st.expander("4. Results", expanded=False):
         st.caption("Results will appear here after a run completes — Phase 5c.")
