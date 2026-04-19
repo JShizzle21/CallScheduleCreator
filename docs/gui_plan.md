@@ -388,6 +388,14 @@ Decisions finalized with user — frozen before code changes begin. Reference fo
 | 11 | Python version | 3.11+ (embeddable build bundled) |
 | 12 | Platform | Windows only; Edge or Chrome |
 | 13 | Error recovery | Top-level catch in GUI, prose message shown, previous results remain visible |
+| 14 | Rank-order widgets (§4.3) | Downgraded from drag-to-reorder to **multiline text area with fixed-set validation**. Streamlit core has no drag-reorder widget; using a 3rd-party component was rejected for simplicity. The allowed items for each list are baked in (users may only reorder, never add/drop) because the scheduler requires every component to be present. Required items shown as a caption above each field. |
+| 15 | SIMULATION_RUNS widget (§4.1) | Downgraded from slider to `st.number_input`. Sliders are imprecise for the 1–5000 range — hard to land on round numbers like 1000. |
+| 16 | PGY3 cutoff picker UX (§4.1) | Implemented as **checkbox gate + date picker**. `st.date_input` cannot itself be "blank" once rendered, so the checkbox toggles the whole feature. On first enable from empty state the picker falls back to `academic_end - 14 days` (not today). Stored as ISO string, or `""` when disabled. |
+| 17 | Reset/Save confirmation (§4.5) | Implemented with `st.dialog` modal (Streamlit ≥1.35). Save is disabled while any hard validation error is present — writing an invalid config would break the CLI. |
+| 18 | Widget-key naming | All Settings widgets use `key="w_<CONFIG_KEY>"` so the sync routine can mirror widget state → cfg in one loop. Checkbox + date-picker components use `cb_<KEY>` / `dp_<KEY>` prefixes. |
+| 19 | Progress callback signature (§7 Phase 3) | `Callable[[completed, total, info], None]` where `info = {"seed", "score", "best_seed", "best_score"}`. `logger.info` per-seed log is preserved alongside the callback so CLI output stays byte-identical. |
+| 20 | Cancel semantics (§7 Phase 3) | `cancel_event: threading.Event` checked after each `as_completed` iteration. On set: `executor.shutdown(cancel_futures=True)`, loop break, `logger.info("Simulation cancelled.")`, return `None`. Caller restores prior results. |
+| 21 | `gui_config.yaml` warning location (§7 Phase 4) | Fires in `scheduler_main._main()` only (not at `config.py` import time) so it only surfaces on actual CLI run, not on every test import or future GUI startup. |
 
 ## 10. Open questions (to measure or resolve during build)
 
