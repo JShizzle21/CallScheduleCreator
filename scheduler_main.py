@@ -10,100 +10,20 @@ from datetime import date, datetime, timedelta
 from functools import partial
 from typing import Dict, List, Tuple, Optional
 
-from config import CONFIG
+from config import CONFIG, load_default_config
+from data_bundle import DataBundle, load_data_bundle
 from errors import ConfigError, DataValidationError, ScheduleError
-from excel_reader import ExcelRotationLookup
 from exports import write_call_totals_xlsx, write_call_schedule_xlsx, write_audit
-from loader import (
-    load_residents, load_no_call_days, load_holidays, load_rotation_rules,
-    load_clinic_days, load_completed_calls,
-)
+from loader import load_completed_calls
 from validation import validate_rotations_against_rules, validate_no_call_days, audit_schedule
 
 logger = logging.getLogger(__name__)
 
-DATA_DIR = CONFIG.get("DATA_DIR", "data")
-OUTPUT_DIR = CONFIG.get("OUTPUT_DIR", "output")
-FLOW_XLSX = CONFIG.get("FLOW_XLSX", "data/flow.xlsx")
-SHEET_NAME = CONFIG.get("SHEET_NAME", "master_block_calendar")
-CLINIC_DAYS_XLSX = CONFIG.get("CLINIC_DAYS_XLSX", "data/clinic_days.xlsx")
-USE_COMPLETED_CALLS = int(CONFIG.get("USE_COMPLETED_CALLS", 0))
-COMPLETED_CALLS_XLSX = CONFIG.get("COMPLETED_CALLS_XLSX", "")
-
-POST_CALL_DAYS = CONFIG.get("POST_CALL_DAYS")
-SIMULATION_RUNS = CONFIG.get("SIMULATION_RUNS")
-
-ACADEMIC_DATE_START_STRING = CONFIG.get("ACADEMIC_DATE_START_STRING")
-ACADEMIC_DATE_END_STRING = CONFIG.get("ACADEMIC_DATE_END_STRING")
-MIN_SPACING_DAYS_STRONG = CONFIG.get("MIN_SPACING_DAYS_STRONG")
-MIN_SPACING_DAYS_MILD = CONFIG.get("MIN_SPACING_DAYS_MILD")
-
-MAX_CALLS_IN_WINDOW = int(CONFIG.get("MAX_CALLS_IN_WINDOW", 0))
-ROLLING_WINDOW_DAYS = int(CONFIG.get("ROLLING_WINDOW_DAYS", 14))
-
-MAX_DIFF_SOFT = CONFIG.get("MAX_DIFF_SOFT")
-MAX_DIFF_HARD = CONFIG.get("MAX_DIFF_HARD")
-
-FAIRNESS_GAP_WEIGHT = CONFIG.get("FAIRNESS_GAP_WEIGHT")
-SPACING_WEIGHT = CONFIG.get("SPACING_WEIGHT")
-AVOID_WEIGHT = CONFIG.get("AVOID_WEIGHT")
-YEAR_BIAS_WEIGHT = CONFIG.get("YEAR_BIAS_WEIGHT")
-PACE_WEIGHT = CONFIG.get("PACE_WEIGHT", CONFIG.get("FUTURE_AVAIL_WEIGHT", 1.0))
-LOOKAHEAD_WEIGHT = CONFIG.get("LOOKAHEAD_WEIGHT", 1.0)
-
-
-ACADEMIC_DATE_START = datetime.strptime(ACADEMIC_DATE_START_STRING, "%Y-%m-%d").date()
-ACADEMIC_DATE_END = datetime.strptime(ACADEMIC_DATE_END_STRING, "%Y-%m-%d").date()
-ACADEMIC_YEAR_START = ACADEMIC_DATE_START.year
-TOTAL_YEAR_DAYS = (ACADEMIC_DATE_END - ACADEMIC_DATE_START).days
-FIRST_HALF_END = date(ACADEMIC_YEAR_START, 12, 31)
-
+# Slot constants — truly static, not user-configurable.
 SLOT_UPPER_WEEKDAY = "UPPER_WEEKDAY"
 SLOT_UPPER_WEEKEND = "UPPER_WEEKEND"
 SLOT_INTERN_WEEKEND = "INTERN_WEEKEND"
 SLOT_INTERN_WEEKDAY = "INTERN_WEEKDAY"
-
-INTERN_BLOCK1_WEEKDAY_CALLS = int(CONFIG.get("INTERN_BLOCK1_WEEKDAY_CALLS", 0))
-
-# PGY3 graduation cutoff — inclusive: PGY3s are excluded on this date and after.
-# If omitted, blank, or outside the academic year range the cutoff is disabled
-# (effectively set to the day after ACADEMIC_DATE_END so it never fires).
-_pgy3_cutoff_raw = CONFIG.get("PGY3_CUTOFF_DATE", "")
-PGY3_CUTOFF_DATE: Optional[date] = None
-if _pgy3_cutoff_raw and str(_pgy3_cutoff_raw).strip():
-    try:
-        _parsed_cutoff = datetime.strptime(str(_pgy3_cutoff_raw).strip(), "%Y-%m-%d").date()
-        if ACADEMIC_DATE_START <= _parsed_cutoff <= ACADEMIC_DATE_END:
-            PGY3_CUTOFF_DATE = _parsed_cutoff
-        else:
-            logger.warning(
-                "WARNING: PGY3_CUTOFF_DATE (%s) is outside the academic year "
-                "(%s – %s). Cutoff disabled; PGY3s will be scheduled through "
-                "the end of the academic year.",
-                _parsed_cutoff, ACADEMIC_DATE_START, ACADEMIC_DATE_END,
-            )
-    except ValueError:
-        logger.warning(
-            "WARNING: PGY3_CUTOFF_DATE '%s' is not a valid date (expected "
-            "YYYY-MM-DD). Cutoff disabled; PGY3s will be scheduled through "
-            "the end of the academic year.",
-            _pgy3_cutoff_raw,
-        )
-
-
-MONTE_CARLO_SCORE_ORDER = CONFIG.get(
-    "MONTE_CARLO_SCORE_ORDER",
-    [
-        "errors",
-        "unassigned",
-        "upper_weekend_diff",
-        "upper_weekday_diff",
-        "upper_total_diff",
-        "intern_weekend_diff",
-        "avoid_assignments",
-        "warnings",
-    ],
-)
 
 VALID_MONTE_CARLO_SCORE_KEYS = {
     "errors",
@@ -118,38 +38,173 @@ VALID_MONTE_CARLO_SCORE_KEYS = {
     "warnings",
 }
 
-invalid_score_keys = [k for k in MONTE_CARLO_SCORE_ORDER if k not in VALID_MONTE_CARLO_SCORE_KEYS]
-if invalid_score_keys:
-    raise ConfigError(
-        f"Invalid MONTE_CARLO_SCORE_ORDER entries: {invalid_score_keys}. "
-        f"Valid options are: {sorted(VALID_MONTE_CARLO_SCORE_KEYS)}"
-    )
-
-PICK_CANDIDATE_RANK_ORDER = CONFIG.get(
-    "PICK_CANDIDATE_RANK_ORDER",
-    [
-        "hard_diff_flag",
-        "soft_diff_flag",
-        "weighted_score",
-    ],
-)
-
 VALID_PICK_CANDIDATE_RANK_KEYS = {
     "hard_diff_flag",
     "soft_diff_flag",
     "weighted_score",
 }
 
-invalid_pick_rank_keys = [
-    k for k in PICK_CANDIDATE_RANK_ORDER
-    if k not in VALID_PICK_CANDIDATE_RANK_KEYS
+_DEFAULT_MONTE_CARLO_SCORE_ORDER = [
+    "errors",
+    "unassigned",
+    "upper_weekend_diff",
+    "upper_weekday_diff",
+    "upper_total_diff",
+    "intern_weekend_diff",
+    "avoid_assignments",
+    "warnings",
 ]
 
-if invalid_pick_rank_keys:
-    raise ConfigError(
-        f"Invalid PICK_CANDIDATE_RANK_ORDER entries: {invalid_pick_rank_keys}. "
-        f"Valid options are: {sorted(VALID_PICK_CANDIDATE_RANK_KEYS)}"
+_DEFAULT_PICK_CANDIDATE_RANK_ORDER = [
+    "hard_diff_flag",
+    "soft_diff_flag",
+    "weighted_score",
+]
+
+
+# Module-level constants below are populated by _apply_config(). They are
+# declared here with sentinel values so the module can be imported without a
+# config dict — _apply_config(CONFIG) is called at the bottom of this module
+# to populate them from config.yaml for backward compat with code and tests
+# that reference e.g. scheduler_main.FAIRNESS_GAP_WEIGHT directly.
+#
+# generate_schedule_once / run_simulation call _apply_config again with the
+# caller-supplied config so GUI overrides take effect per run.
+POST_CALL_DAYS: int = 0
+SIMULATION_RUNS: int = 0
+ACADEMIC_DATE_START_STRING: str = ""
+ACADEMIC_DATE_END_STRING: str = ""
+ACADEMIC_DATE_START: date = date(1970, 1, 1)
+ACADEMIC_DATE_END: date = date(1970, 1, 1)
+ACADEMIC_YEAR_START: int = 1970
+TOTAL_YEAR_DAYS: int = 0
+FIRST_HALF_END: date = date(1970, 12, 31)
+MIN_SPACING_DAYS_STRONG: int = 0
+MIN_SPACING_DAYS_MILD: int = 0
+MAX_CALLS_IN_WINDOW: int = 0
+ROLLING_WINDOW_DAYS: int = 0
+MAX_DIFF_SOFT: int = 0
+MAX_DIFF_HARD: int = 0
+FAIRNESS_GAP_WEIGHT: float = 0.0
+SPACING_WEIGHT: float = 0.0
+AVOID_WEIGHT: float = 0.0
+YEAR_BIAS_WEIGHT: float = 0.0
+PACE_WEIGHT: float = 0.0
+LOOKAHEAD_WEIGHT: float = 0.0
+INTERN_BLOCK1_WEEKDAY_CALLS: int = 0
+PGY3_CUTOFF_DATE: Optional[date] = None
+MONTE_CARLO_SCORE_ORDER: List[str] = list(_DEFAULT_MONTE_CARLO_SCORE_ORDER)
+PICK_CANDIDATE_RANK_ORDER: List[str] = list(_DEFAULT_PICK_CANDIDATE_RANK_ORDER)
+
+
+def _apply_config(config: dict) -> None:
+    """Populate module-level scheduler constants from `config`.
+
+    Mutates this module's global namespace. Callers pass the config dict
+    returned by `load_default_config()` (CLI) or built from `st.session_state`
+    (GUI). The function is idempotent — calling it twice with the same config
+    is a no-op.
+
+    Rationale: the scheduler has ~25 tuning parameters threaded through many
+    small helpers (spacing, window cap, year bias, weights). Passing `config`
+    through every signature would be a large, noisy change for no real
+    benefit since a single simulation run uses one config. Instead, we apply
+    config once per run and let the helpers read module globals.
+    """
+    global POST_CALL_DAYS, SIMULATION_RUNS
+    global ACADEMIC_DATE_START_STRING, ACADEMIC_DATE_END_STRING
+    global ACADEMIC_DATE_START, ACADEMIC_DATE_END
+    global ACADEMIC_YEAR_START, TOTAL_YEAR_DAYS, FIRST_HALF_END
+    global MIN_SPACING_DAYS_STRONG, MIN_SPACING_DAYS_MILD
+    global MAX_CALLS_IN_WINDOW, ROLLING_WINDOW_DAYS
+    global MAX_DIFF_SOFT, MAX_DIFF_HARD
+    global FAIRNESS_GAP_WEIGHT, SPACING_WEIGHT, AVOID_WEIGHT
+    global YEAR_BIAS_WEIGHT, PACE_WEIGHT, LOOKAHEAD_WEIGHT
+    global INTERN_BLOCK1_WEEKDAY_CALLS, PGY3_CUTOFF_DATE
+    global MONTE_CARLO_SCORE_ORDER, PICK_CANDIDATE_RANK_ORDER
+
+    POST_CALL_DAYS = int(config["POST_CALL_DAYS"])
+    SIMULATION_RUNS = int(config.get("SIMULATION_RUNS", 1000))
+
+    ACADEMIC_DATE_START_STRING = config["ACADEMIC_DATE_START_STRING"]
+    ACADEMIC_DATE_END_STRING = config["ACADEMIC_DATE_END_STRING"]
+    ACADEMIC_DATE_START = datetime.strptime(ACADEMIC_DATE_START_STRING, "%Y-%m-%d").date()
+    ACADEMIC_DATE_END = datetime.strptime(ACADEMIC_DATE_END_STRING, "%Y-%m-%d").date()
+    ACADEMIC_YEAR_START = ACADEMIC_DATE_START.year
+    TOTAL_YEAR_DAYS = (ACADEMIC_DATE_END - ACADEMIC_DATE_START).days
+    FIRST_HALF_END = date(ACADEMIC_YEAR_START, 12, 31)
+
+    MIN_SPACING_DAYS_STRONG = int(config["MIN_SPACING_DAYS_STRONG"])
+    MIN_SPACING_DAYS_MILD = int(config["MIN_SPACING_DAYS_MILD"])
+    MAX_CALLS_IN_WINDOW = int(config.get("MAX_CALLS_IN_WINDOW", 0))
+    ROLLING_WINDOW_DAYS = int(config.get("ROLLING_WINDOW_DAYS", 14))
+    MAX_DIFF_SOFT = int(config["MAX_DIFF_SOFT"])
+    MAX_DIFF_HARD = int(config["MAX_DIFF_HARD"])
+
+    FAIRNESS_GAP_WEIGHT = float(config["FAIRNESS_GAP_WEIGHT"])
+    SPACING_WEIGHT = float(config["SPACING_WEIGHT"])
+    AVOID_WEIGHT = float(config["AVOID_WEIGHT"])
+    YEAR_BIAS_WEIGHT = float(config["YEAR_BIAS_WEIGHT"])
+    PACE_WEIGHT = float(config.get("PACE_WEIGHT", config.get("FUTURE_AVAIL_WEIGHT", 1.0)))
+    LOOKAHEAD_WEIGHT = float(config.get("LOOKAHEAD_WEIGHT", 1.0))
+
+    INTERN_BLOCK1_WEEKDAY_CALLS = int(config.get("INTERN_BLOCK1_WEEKDAY_CALLS", 0))
+
+    # PGY3 graduation cutoff — inclusive: PGY3s are excluded on this date and
+    # after. If omitted, blank, or outside the academic year range the cutoff
+    # is disabled.
+    _pgy3_cutoff_raw = config.get("PGY3_CUTOFF_DATE", "")
+    PGY3_CUTOFF_DATE = None
+    if _pgy3_cutoff_raw and str(_pgy3_cutoff_raw).strip():
+        try:
+            _parsed_cutoff = datetime.strptime(str(_pgy3_cutoff_raw).strip(), "%Y-%m-%d").date()
+            if ACADEMIC_DATE_START <= _parsed_cutoff <= ACADEMIC_DATE_END:
+                PGY3_CUTOFF_DATE = _parsed_cutoff
+            else:
+                logger.warning(
+                    "WARNING: PGY3_CUTOFF_DATE (%s) is outside the academic year "
+                    "(%s – %s). Cutoff disabled; PGY3s will be scheduled through "
+                    "the end of the academic year.",
+                    _parsed_cutoff, ACADEMIC_DATE_START, ACADEMIC_DATE_END,
+                )
+        except ValueError:
+            logger.warning(
+                "WARNING: PGY3_CUTOFF_DATE '%s' is not a valid date (expected "
+                "YYYY-MM-DD). Cutoff disabled; PGY3s will be scheduled through "
+                "the end of the academic year.",
+                _pgy3_cutoff_raw,
+            )
+
+    MONTE_CARLO_SCORE_ORDER = list(
+        config.get("MONTE_CARLO_SCORE_ORDER", _DEFAULT_MONTE_CARLO_SCORE_ORDER)
     )
+    invalid_score_keys = [
+        k for k in MONTE_CARLO_SCORE_ORDER if k not in VALID_MONTE_CARLO_SCORE_KEYS
+    ]
+    if invalid_score_keys:
+        raise ConfigError(
+            f"Invalid MONTE_CARLO_SCORE_ORDER entries: {invalid_score_keys}. "
+            f"Valid options are: {sorted(VALID_MONTE_CARLO_SCORE_KEYS)}"
+        )
+
+    PICK_CANDIDATE_RANK_ORDER = list(
+        config.get("PICK_CANDIDATE_RANK_ORDER", _DEFAULT_PICK_CANDIDATE_RANK_ORDER)
+    )
+    invalid_pick_rank_keys = [
+        k for k in PICK_CANDIDATE_RANK_ORDER
+        if k not in VALID_PICK_CANDIDATE_RANK_KEYS
+    ]
+    if invalid_pick_rank_keys:
+        raise ConfigError(
+            f"Invalid PICK_CANDIDATE_RANK_ORDER entries: {invalid_pick_rank_keys}. "
+            f"Valid options are: {sorted(VALID_PICK_CANDIDATE_RANK_KEYS)}"
+        )
+
+
+# Populate module globals from config.yaml at import time. Backward-compat
+# shim — keeps `from scheduler_main import X` and `sm.X` references working
+# without requiring callers to invoke _apply_config manually.
+_apply_config(CONFIG)
 
 
 
@@ -939,34 +994,52 @@ def _pre_apply_holidays(
     return schedule_rows, unassigned_rows, holiday_assignments
 
 
-def _merge_no_call(
-    base: Dict[str, dict],
-    overlay: Dict[str, dict],
-) -> Dict[str, dict]:
-    """Return a new dict that is base updated with overlay entries.
-    Neither input is mutated.
+def generate_schedule_once(
+    seed=None,
+    completed_assignments=None,
+    config: Optional[dict] = None,
+    paths: Optional[dict] = None,
+    data_bundle: Optional[DataBundle] = None,
+):
+    """Generate one schedule for a given seed.
+
+    Parameters:
+      seed: rng seed; `None` for nondeterministic.
+      completed_assignments: optional partial-year seed data (overrides the
+        bundle's completed_calls). Pass the bundle's own completed_calls to
+        honor the partial-year mode from paths.
+      config: behavior parameters (weights, dates, thresholds). If None, the
+        last-applied config is reused (module globals). CLI + GUI both pass
+        this explicitly; tests and the auto-apply at import cover the None case.
+      paths: file locations. Required unless `data_bundle` is passed.
+      data_bundle: pre-built DataBundle. Pass this to avoid re-reading input
+        files between calls. If None, a fresh bundle is built from `paths`.
+        NOTE: the bundle's `residents` dict is mutated by apply_assignment.
+        Callers supplying their own bundle must rebuild it per call or the
+        state leaks across runs.
     """
-    merged = {name: dict(dates) for name, dates in base.items()}
-    for name, dates in overlay.items():
-        merged.setdefault(name, {}).update(dates)
-    return merged
+    if config is not None:
+        _apply_config(config)
 
+    if data_bundle is None:
+        if paths is None:
+            _, paths = load_default_config()
+        data_bundle = load_data_bundle(
+            paths,
+            academic_year_start=ACADEMIC_YEAR_START,
+            intern_block1_weekday_calls=bool(INTERN_BLOCK1_WEEKDAY_CALLS),
+            use_completed_calls=False,  # completed_assignments param wins
+        )
 
-def generate_schedule_once(seed=None, completed_assignments=None):
     rng = random.Random(seed)
     tiebreaker_count = 0
 
-    lookup = ExcelRotationLookup(FLOW_XLSX, SHEET_NAME, ACADEMIC_YEAR_START)
-    block1_end = lookup.blocks[0].end if (INTERN_BLOCK1_WEEKDAY_CALLS and lookup.blocks) else None
-    residents = load_residents(lookup)
-    rules = load_rotation_rules()
-    no_call_base = load_no_call_days()
-    clinic_pre_blocks = load_clinic_days(CLINIC_DAYS_XLSX)
-    # Merge clinic-derived pre-call blocks into no_call so the same eligibility
-    # path enforces both; the distinct reason string ("pre_clinic_day") is
-    # preserved so the unassigned report can distinguish the two sources.
-    no_call = _merge_no_call(no_call_base, clinic_pre_blocks)
-    holidays = load_holidays()
+    lookup = data_bundle.lookup
+    residents = data_bundle.residents
+    rules = data_bundle.rules
+    no_call = data_bundle.no_call
+    holidays = data_bundle.holidays
+    block1_end = data_bundle.block1_end
 
     validate_rotations_against_rules(lookup, residents, rules)
     validate_no_call_days(no_call, residents)  # validates merged dict (both sources)
@@ -1159,17 +1232,49 @@ def monte_carlo_score(result):
 def format_monte_carlo_score(score):
     return ", ".join(f"{key}={value}" for key, value in zip(MONTE_CARLO_SCORE_ORDER, score))
 
-def _score_seed(seed: int, completed_assignments=None) -> tuple:
-    """Worker function: returns (seed, score_tuple). Must be top-level for pickling."""
-    result = generate_schedule_once(seed=seed, completed_assignments=completed_assignments)
+def _score_seed(
+    seed: int,
+    config: dict,
+    paths: dict,
+    completed_assignments=None,
+) -> tuple:
+    """Worker function: returns (seed, score_tuple). Must be top-level for pickling.
+
+    Runs in a ProcessPoolExecutor child process. On Windows (spawn) the child
+    re-imports this module, re-runs _apply_config(CONFIG), then
+    generate_schedule_once re-applies the caller-supplied config. The data
+    bundle is rebuilt fresh per call — residents state cannot leak between
+    seeds because each call builds its own bundle.
+    """
+    result = generate_schedule_once(
+        seed=seed,
+        config=config,
+        paths=paths,
+        completed_assignments=completed_assignments,
+    )
     return seed, monte_carlo_score(result)
 
 
-def run_simulation(num_runs=50, completed_assignments=None):
+def run_simulation(
+    num_runs: int,
+    config: dict,
+    paths: dict,
+    completed_assignments=None,
+):
+    # Apply config in the driver process too — format_monte_carlo_score reads
+    # MONTE_CARLO_SCORE_ORDER from module globals, and workers' results come
+    # back here for logging.
+    _apply_config(config)
+
     start = time.time()
     seed_scores: list[tuple[int, tuple]] = []
 
-    worker = partial(_score_seed, completed_assignments=completed_assignments or [])
+    worker = partial(
+        _score_seed,
+        config=config,
+        paths=paths,
+        completed_assignments=completed_assignments or [],
+    )
 
     with concurrent.futures.ProcessPoolExecutor() as executor:
         futures = {executor.submit(worker, seed): seed for seed in range(num_runs)}
@@ -1179,7 +1284,12 @@ def run_simulation(num_runs=50, completed_assignments=None):
             logger.info(f"[{len(seed_scores)}/{num_runs}] seed={seed} | {format_monte_carlo_score(score)}")
 
     best_seed, best_score = min(seed_scores, key=lambda x: x[1])
-    best_result = generate_schedule_once(seed=best_seed, completed_assignments=completed_assignments)
+    best_result = generate_schedule_once(
+        seed=best_seed,
+        config=config,
+        paths=paths,
+        completed_assignments=completed_assignments,
+    )
 
     end = time.time()
     logger.info(f"\nSimulation completed in {end - start:.2f} seconds")
@@ -1188,7 +1298,7 @@ def run_simulation(num_runs=50, completed_assignments=None):
     return best_result
 
 
-def export_result(result):
+def export_result(result, paths: dict):
     schedule_rows = result["schedule_rows"]
     residents = result["residents"]
     lookup = result["lookup"]
@@ -1204,22 +1314,23 @@ def export_result(result):
 
     intern_names = [n for n, r in residents.items() if r["pgy"] == 1]
 
-    write_call_totals_xlsx(residents, f"{DATA_DIR}/{OUTPUT_DIR}/call_totals.xlsx")
+    out_dir = f"{paths['data_dir']}/{paths['output_dir']}"
+    write_call_totals_xlsx(residents, f"{out_dir}/call_totals.xlsx")
     write_call_schedule_xlsx(
         schedule_rows,
         holidays,
         no_call,
-        f"{DATA_DIR}/{OUTPUT_DIR}/call_schedule.xlsx",
+        f"{out_dir}/call_schedule.xlsx",
         lookup,
         intern_names,
     )
     logger.info("Excel files exported:")
-    logger.info(f"  {DATA_DIR}/{OUTPUT_DIR}/call_totals.xlsx")
-    logger.info(f"  {DATA_DIR}/{OUTPUT_DIR}/call_schedule.xlsx")
+    logger.info(f"  {out_dir}/call_totals.xlsx")
+    logger.info(f"  {out_dir}/call_schedule.xlsx")
 
     audit_data = result["audit_data"]
-    write_audit(audit_data, path=f"{DATA_DIR}/{OUTPUT_DIR}/audit_report.txt")
-    logger.info(f"Wrote to: {DATA_DIR}/{OUTPUT_DIR}/audit_report.txt")
+    write_audit(audit_data, path=f"{out_dir}/audit_report.txt")
+    logger.info(f"Wrote to: {out_dir}/audit_report.txt")
 
 
 def _main() -> int:
@@ -1233,25 +1344,44 @@ def _main() -> int:
         force=True,
     )
 
-    # When Block 1 intern weekday calls are enabled, we need the block 1 end date
-    # so load_completed_calls can correctly classify weekday intern entries.
-    if USE_COMPLETED_CALLS and INTERN_BLOCK1_WEEKDAY_CALLS:
-        _lu = ExcelRotationLookup(FLOW_XLSX, SHEET_NAME, ACADEMIC_YEAR_START)
-        _block1_end = _lu.blocks[0].end if _lu.blocks else None
+    config, paths = load_default_config()
+    _apply_config(config)
+
+    use_completed = bool(int(config.get("USE_COMPLETED_CALLS", 0)))
+
+    if use_completed:
+        # Building a DataBundle here would be wasteful (run_simulation rebuilds
+        # one per seed); we only need block1_end to classify weekday intern
+        # entries correctly. Build it via a throwaway bundle load, or just
+        # read the flow sheet once.
+        if INTERN_BLOCK1_WEEKDAY_CALLS:
+            bundle = load_data_bundle(
+                paths,
+                academic_year_start=ACADEMIC_YEAR_START,
+                intern_block1_weekday_calls=True,
+                use_completed_calls=False,
+            )
+            _block1_end = bundle.block1_end
+        else:
+            _block1_end = None
+        completed = load_completed_calls(paths["completed_calls_xlsx"], block1_end=_block1_end)
     else:
-        _block1_end = None
-    completed = load_completed_calls(COMPLETED_CALLS_XLSX, block1_end=_block1_end) if USE_COMPLETED_CALLS else []
+        completed = []
 
     if completed:
-        from datetime import timedelta as _td
-        restart = max(d for d, _, _ in completed) + _td(days=1)
+        restart = max(d for d, _, _ in completed) + timedelta(days=1)
         logger.info(f"Partial year mode: {len(completed)} completed call(s) loaded.")
         logger.info(f"Generating schedule from {restart} onward.\n")
     else:
         logger.info("Full year mode: generating schedule from scratch.\n")
 
-    best_result = run_simulation(num_runs=SIMULATION_RUNS, completed_assignments=completed)
-    export_result(best_result)
+    best_result = run_simulation(
+        num_runs=SIMULATION_RUNS,
+        config=config,
+        paths=paths,
+        completed_assignments=completed,
+    )
+    export_result(best_result, paths=paths)
     return 0
 
 
