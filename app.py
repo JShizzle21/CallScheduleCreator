@@ -971,6 +971,58 @@ def _count_diffs(defaults: dict) -> int:
     )
 
 
+_INT_WIDGET_KEYS = (
+    "SIMULATION_RUNS",
+    "POST_CALL_DAYS",
+    "MIN_SPACING_DAYS_STRONG",
+    "MIN_SPACING_DAYS_MILD",
+    "MAX_CALLS_IN_WINDOW",
+    "ROLLING_WINDOW_DAYS",
+    "MAX_DIFF_SOFT",
+    "MAX_DIFF_HARD",
+)
+_BOOL_WIDGET_KEYS = ("USE_COMPLETED_CALLS", "INTERN_BLOCK1_WEEKDAY_CALLS")
+
+
+def _seed_widget_state_from_config(cfg: dict) -> None:
+    """Write each widget's session_state key from cfg.
+
+    Required because deleting `w_*` keys to "reset" widgets is unreliable
+    in Streamlit — widgets like date_input and number_input often keep
+    their browser-side value through the rerun, leaving the UI stuck on
+    the user's edits even though cfg is back to defaults. Explicitly
+    setting `st.session_state[wkey] = <typed default>` BEFORE the next
+    rerun is the canonical fix and works for every widget type.
+    """
+    # Dates: ACADEMIC_DATE_START / END are plain date pickers.
+    for key in ("ACADEMIC_DATE_START_STRING", "ACADEMIC_DATE_END_STRING"):
+        d = _parse_date_or_none(cfg.get(key))
+        if d is not None:
+            st.session_state[f"w_{key}"] = d
+
+    # PGY3 cutoff: checkbox + (optional) date picker.
+    cutoff = _parse_date_or_none(cfg.get("PGY3_CUTOFF_DATE"))
+    st.session_state["cb_PGY3_CUTOFF_DATE"] = cutoff is not None
+    if cutoff is not None:
+        st.session_state["dp_PGY3_CUTOFF_DATE"] = cutoff
+
+    for key in _INT_WIDGET_KEYS:
+        st.session_state[f"w_{key}"] = int(cfg.get(key, 0))
+
+    for key in _BOOL_WIDGET_KEYS:
+        st.session_state[f"w_{key}"] = bool(int(cfg.get(key, 0)))
+
+    st.session_state["w_NIGHT_FLOAT_ROTATION_NAME"] = str(
+        cfg.get("NIGHT_FLOAT_ROTATION_NAME", "NF")
+    )
+
+    for key in WEIGHT_KEYS:
+        st.session_state[f"w_{key}"] = float(cfg.get(key, 0.0))
+
+    # Rank-order lists are not widget-backed (the ▲/▼ buttons mutate
+    # cfg[key] directly), so nothing to seed for them.
+
+
 @st.dialog("Reset to defaults?")
 def _confirm_reset() -> None:
     st.write("Discard all your changes and return to the saved defaults in config.yaml?")
@@ -978,10 +1030,7 @@ def _confirm_reset() -> None:
     if cols[0].button("Yes, reset", type="primary", key="dlg_reset_yes"):
         fresh, _ = load_default_config()
         st.session_state.config = fresh
-        # Clear per-widget keys so widgets re-initialise from the fresh config.
-        for k in list(st.session_state.keys()):
-            if k.startswith("w_") or k.startswith("cb_") or k.startswith("dp_"):
-                del st.session_state[k]
+        _seed_widget_state_from_config(fresh)
         st.rerun()
     if cols[1].button("Cancel", key="dlg_reset_no"):
         st.rerun()
