@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import re
 import shutil
 import tempfile
 import threading
@@ -121,6 +122,37 @@ class UploadSlot:
     help: str
 
 
+def _looks_like_date(v) -> bool:
+    """Mirror excel_reader._to_date's accepted forms (loosely).
+
+    The real flow-sheet loader parses date/datetime objects and a wide
+    range of string formats including "JUL 1", "7/1/2025", and ISO. The
+    upload validator must be at least as permissive — otherwise legit
+    flow sheets get rejected here even though the loader would parse
+    them fine.
+    """
+    if v is None:
+        return False
+    if isinstance(v, (date, datetime)):
+        return True
+    s = str(v).strip()
+    if not s:
+        return False
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y"):
+        try:
+            datetime.strptime(s, fmt)
+            return True
+        except ValueError:
+            pass
+    # Month-abbreviation form: "JUL 1", "Jul 01", "JUL-1", etc.
+    if re.search(
+        r"\b(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\b\W*\d{1,2}",
+        s.upper(),
+    ):
+        return True
+    return False
+
+
 def _validate_flow(path: Path) -> Optional[str]:
     try:
         wb = load_workbook(path, read_only=True, data_only=True)
@@ -132,9 +164,11 @@ def _validate_flow(path: Path) -> Optional[str]:
             f"Found: {', '.join(wb.sheetnames)}"
         )
     ws = wb["master_block_calendar"]
-    # Row 2, column B+ should hold block start dates.
+    # Row 2, column B+ should hold block start dates. Match the loader's
+    # parsing rules (excel_reader._to_date) so any value the real loader
+    # accepts also passes here.
     date_cells = [ws.cell(row=2, column=c).value for c in range(2, min(ws.max_column, 30) + 1)]
-    if not any(hasattr(v, "year") for v in date_cells):
+    if not any(_looks_like_date(v) for v in date_cells):
         return (
             "Flow sheet error: row 2 does not contain any parseable dates in "
             "columns B onward. Expected block start dates there."
@@ -142,18 +176,28 @@ def _validate_flow(path: Path) -> Optional[str]:
     return None
 
 
-def _validate_headers(path: Path, required_headers: set[str], label: str) -> Optional[str]:
+def _read_headers(path: Path) -> tuple[Optional[set[str]], Optional[str]]:
+    """Return (lowercase header set, error). One of the two is None."""
     try:
         wb = load_workbook(path, read_only=True, data_only=True)
     except Exception as exc:
-        return f"Could not open workbook: {exc}"
+        return None, f"Could not open workbook: {exc}"
     ws = wb.active
     headers = {
         str(ws.cell(row=1, column=c).value).strip().lower()
         for c in range(1, ws.max_column + 1)
         if ws.cell(row=1, column=c).value is not None
     }
-    missing = {h.lower() for h in required_headers} - headers
+    return headers, None
+
+
+def _validate_required_headers(
+    path: Path, required: set[str], label: str
+) -> Optional[str]:
+    headers, err = _read_headers(path)
+    if err is not None:
+        return err
+    missing = {h.lower() for h in required} - headers
     if missing:
         return (
             f"{label} error: header row is missing required column(s): "
@@ -163,23 +207,42 @@ def _validate_headers(path: Path, required_headers: set[str], label: str) -> Opt
 
 
 def _validate_rotation_rules(path: Path) -> Optional[str]:
-    return _validate_headers(path, {"rotation", "PGY1", "PGY2", "PGY3"}, "Rotation rules")
+    # loader.load_rotation_rules reads row['rotation_name'], row['pgy'],
+    # row['preference'] (lower-cased by _normalize_header).
+    return _validate_required_headers(
+        path, {"rotation_name", "pgy", "preference"}, "Rotation rules"
+    )
 
 
 def _validate_no_call(path: Path) -> Optional[str]:
-    return _validate_headers(path, {"name", "date"}, "No-call days")
+    # loader.load_no_call_days reads name, start_date, end_date, type.
+    # 'type' is optional (load handles missing via row.get).
+    return _validate_required_headers(
+        path, {"name", "start_date", "end_date"}, "No-call days"
+    )
 
 
 def _validate_holidays(path: Path) -> Optional[str]:
-    return _validate_headers(path, {"date"}, "Holidays")
+    return _validate_required_headers(path, {"date"}, "Holidays")
 
 
 def _validate_clinic(path: Path) -> Optional[str]:
-    return _validate_headers(path, {"name", "date"}, "Clinic days")
+    return _validate_required_headers(path, {"name", "date"}, "Clinic days")
 
 
 def _validate_completed(path: Path) -> Optional[str]:
-    return _validate_headers(path, {"date"}, "Completed calls")
+    # loader.load_completed_calls finds columns by substring match
+    # ('date' / 'upper' / 'intern'), so accept any header containing
+    # 'date' to match.
+    headers, err = _read_headers(path)
+    if err is not None:
+        return err
+    if not any("date" in h for h in headers):
+        return (
+            "Completed calls error: no column whose header contains 'date'. "
+            f"Found: {', '.join(sorted(headers))}."
+        )
+    return None
 
 
 UPLOAD_SLOTS: list[UploadSlot] = [
