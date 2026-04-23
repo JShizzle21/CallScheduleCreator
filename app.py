@@ -652,10 +652,9 @@ def _sync_cfg_from_widgets(cfg: dict) -> None:
         if v is not None:
             cfg[key] = float(v)
 
-    for key in ("PICK_CANDIDATE_RANK_ORDER", "MONTE_CARLO_SCORE_ORDER"):
-        v = _get(f"w_{key}")
-        if v is not None:
-            cfg[key] = [ln.strip() for ln in str(v).splitlines() if ln.strip()]
+    # PICK_CANDIDATE_RANK_ORDER and MONTE_CARLO_SCORE_ORDER are no longer
+    # backed by a text widget — the up/down buttons mutate cfg[key]
+    # directly, so cfg is already the source of truth here.
 
 
 def _diff_marker(key: str, defaults: dict) -> str:
@@ -810,6 +809,33 @@ def _render_advanced_section(defaults: dict, errors: dict[str, list[str]]) -> No
          "Rolling cap: no more than this many calls per N days. Set to 0 to disable.")
     _num("ROLLING_WINDOW_DAYS", "Rolling window (days)",
          "Size of the rolling window for the cap above.", min_value=1)
+
+
+def _render_expert_section(defaults: dict, errors: dict[str, list[str]]) -> None:
+    cfg = st.session_state.config
+
+    st.warning(
+        "⚠️ These values control how the scheduler ranks candidates. They have "
+        "been tuned through Monte Carlo testing. Modifying them may produce "
+        "worse schedules. Change only if you understand the weighted-score "
+        "system — see README §Scoring."
+    )
+
+    # Fairness thresholds + Night Float code live in Expert because they
+    # affect the internal ranking logic in non-obvious ways.
+    def _num(key: str, label: str, help_text: str, min_value: int = 0):
+        cfg[key] = int(
+            st.number_input(
+                _label(key, label, defaults),
+                min_value=min_value,
+                value=int(cfg.get(key, 0)),
+                step=1,
+                key=f"w_{key}",
+                help=help_text,
+            )
+        )
+        _render_errors(key, errors)
+
     _num("MAX_DIFF_SOFT", "Soft fairness threshold",
          "Call-count gap that triggers the soft fairness flag in ranking.", min_value=1)
     _num("MAX_DIFF_HARD", "Hard fairness threshold",
@@ -822,17 +848,6 @@ def _render_advanced_section(defaults: dict, errors: dict[str, list[str]]) -> No
         help="The exact name used for Night Float in the flow sheet (e.g. 'NF').",
     )
     _render_errors("NIGHT_FLOAT_ROTATION_NAME", errors)
-
-
-def _render_expert_section(defaults: dict, errors: dict[str, list[str]]) -> None:
-    cfg = st.session_state.config
-
-    st.warning(
-        "⚠️ These values control how the scheduler ranks candidates. They have "
-        "been tuned through Monte Carlo testing. Modifying them may produce "
-        "worse schedules. Change only if you understand the weighted-score "
-        "system — see README §Scoring."
-    )
 
     def _weight(key: str, label: str, help_text: str):
         cfg[key] = float(
@@ -893,18 +908,53 @@ def _render_rank_order(
     defaults: dict,
     errors: dict[str, list[str]],
 ) -> None:
+    """Reorderable list with ▲/▼ buttons. Set is fixed (no add/remove).
+
+    Free-text entry was too error-prone — typos silently broke the
+    scheduler. Buttons enforce the invariant: cfg[key] is always a
+    permutation of `allowed`. If cfg arrives malformed (extra/missing
+    items, e.g. from a stale config.yaml), we show a self-heal button
+    instead of trying to render reorder rows for a broken list.
+    """
     cfg = st.session_state.config
-    current = cfg.get(key) or []
-    st.caption(f"Required items: {', '.join(sorted(allowed))}")
-    text = st.text_area(
-        _label(key, label, defaults),
-        value="\n".join(current),
-        key=f"w_{key}",
-        height=150,
-        help=help_text,
-    )
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    cfg[key] = lines
+    current = list(cfg.get(key) or [])
+
+    st.markdown(f"**{label}**{_diff_marker(key, defaults)}")
+    if help_text:
+        st.caption(help_text)
+
+    # Self-heal path: list is malformed. Offer a one-click reset to the
+    # default order so the user isn't stuck. We don't auto-repair to
+    # avoid silently mutating Saved values.
+    if set(current) != allowed or len(current) != len(set(current)):
+        st.error(
+            f"List is invalid (must contain each of these once): "
+            f"{', '.join(sorted(allowed))}. Current: {current}"
+        )
+        if st.button(f"Reset {label} to default order", key=f"reset_{key}"):
+            default_list = defaults.get(key)
+            if isinstance(default_list, list) and set(default_list) == allowed:
+                cfg[key] = list(default_list)
+            else:
+                cfg[key] = sorted(allowed)
+            st.rerun()
+        _render_errors(key, errors)
+        return
+
+    n = len(current)
+    for i, item in enumerate(current):
+        cols = st.columns([6, 1, 1])
+        cols[0].markdown(f"`{i + 1}.` {item}")
+        if cols[1].button("▲", key=f"up_{key}_{i}", disabled=(i == 0),
+                          help="Move up"):
+            current[i - 1], current[i] = current[i], current[i - 1]
+            cfg[key] = current
+            st.rerun()
+        if cols[2].button("▼", key=f"down_{key}_{i}", disabled=(i == n - 1),
+                          help="Move down"):
+            current[i + 1], current[i] = current[i], current[i + 1]
+            cfg[key] = current
+            st.rerun()
     _render_errors(key, errors)
 
 
@@ -1003,7 +1053,7 @@ def _render_settings_section() -> tuple[bool, list[str]]:
 
 # Quick preview seed count. Hardcoded for now; empirical tuning is
 # tracked in docs/gui_plan.md §10.1.
-QUICK_PREVIEW_RUNS = 50
+QUICK_PREVIEW_RUNS = 100
 
 # Output directory for the three xlsx/txt artifacts. Spec §2 says these
 # overwrite each run, matching CLI behavior.
@@ -1265,6 +1315,20 @@ def _render_run_section(uploads_ready: bool, settings_has_errors: bool, soft_war
         st.warning("Upload all required files above before running.")
     if settings_has_errors:
         st.error("Fix the validation errors in Settings before running.")
+
+    # Partial-year mode requires the completed_calls upload to actually
+    # be present + valid. Caught here (not in Settings) because it's a
+    # cross-cut between Settings and Uploads.
+    partial_mode_missing_file = False
+    if bool(int(st.session_state.config.get("USE_COMPLETED_CALLS", 0))):
+        completed_entry = st.session_state.uploads.get("completed_calls")
+        if completed_entry is None or completed_entry.get("error") is not None:
+            partial_mode_missing_file = True
+            st.error(
+                "Partial-year mode is ON but no valid completed_calls.xlsx is "
+                "uploaded. Upload it in section 1, or turn off "
+                "\"Partial-year mode\" in Settings."
+            )
     if soft_warnings:
         with st.expander(f"Configuration warnings ({len(soft_warnings)})", expanded=False):
             for w in soft_warnings:
@@ -1282,6 +1346,7 @@ def _render_run_section(uploads_ready: bool, settings_has_errors: bool, soft_war
     run_disabled = (
         not uploads_ready
         or settings_has_errors
+        or partial_mode_missing_file
         or state == "running"
     )
     if cols[0].button(
