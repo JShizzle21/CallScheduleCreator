@@ -686,6 +686,13 @@ def _date_input_nullable(
     across uncheck/recheck cycles.
     """
     current = _parse_date_or_none(value_raw)
+    # Remember the most recent picked value so unchecking → rechecking
+    # restores it. Streamlit drops dp_* session_state when the widget
+    # isn't rendered, so we need our own stash.
+    remember_key = f"_last_{key}"
+    if current is not None:
+        st.session_state[remember_key] = current
+
     enabled = st.checkbox(
         f"Enable {label.lower()}",
         value=current is not None,
@@ -694,13 +701,58 @@ def _date_input_nullable(
     )
     if not enabled:
         return ""
+    initial = current or st.session_state.get(remember_key) or fallback_date
     picked = st.date_input(
         label,
-        value=current or fallback_date,
+        value=initial,
         key=f"dp_{key}",
         label_visibility="collapsed",
     )
+    if picked:
+        st.session_state[remember_key] = picked
     return picked.isoformat() if picked else ""
+
+
+def _default_anchor_year() -> int:
+    """Start year of the next-upcoming academic year.
+
+    The current AY is treated as already in progress / past for scheduling
+    purposes, so we anchor on the next one. Today 2026-04-23 → 2026
+    (AY 2026–2027 starts Jul 1 2026). Today 2026-08-15 → 2027.
+    """
+    today = date.today()
+    return today.year if today.month < 7 else today.year + 1
+
+
+def _academic_year_options(anchor_year: int | None = None) -> list[tuple[str, date, date]]:
+    """Return (label, start_date, end_date) for 10 consecutive academic years.
+
+    Each AY runs Jul 1 of year Y → Jun 30 of year Y+1. The list starts at the
+    next-upcoming AY (or `anchor_year` if given) and lists 10 forward.
+    """
+    if anchor_year is None:
+        anchor_year = _default_anchor_year()
+    options = []
+    for i in range(10):
+        y = anchor_year + i
+        s = date(y, 7, 1)
+        e = date(y + 1, 6, 30)
+        label = f"{s.month}/{s.day}/{s.year} – {e.month}/{e.day}/{e.year}"
+        options.append((label, s, e))
+    return options
+
+
+def _is_standard_academic_year(start: date | None, end: date | None) -> bool:
+    """True if (start, end) is a Jul 1 → next Jun 30 pair."""
+    if start is None or end is None:
+        return False
+    return (
+        start.month == 7
+        and start.day == 1
+        and end.month == 6
+        and end.day == 30
+        and end.year == start.year + 1
+    )
 
 
 def _render_common_section(defaults: dict, errors: dict[str, list[str]]) -> None:
@@ -708,27 +760,80 @@ def _render_common_section(defaults: dict, errors: dict[str, list[str]]) -> None
 
     cfg = st.session_state.config
 
-    start_raw = str(cfg.get("ACADEMIC_DATE_START_STRING", ""))
-    start_current = _parse_date_or_none(start_raw) or date.today()
-    start_picked = st.date_input(
-        _label("ACADEMIC_DATE_START_STRING", "Academic year start", defaults),
-        value=start_current,
-        key="w_ACADEMIC_DATE_START_STRING",
-        help="First day of the academic year. All scheduling begins from this date.",
-    )
-    cfg["ACADEMIC_DATE_START_STRING"] = start_picked.isoformat() if start_picked else ""
-    _render_errors("ACADEMIC_DATE_START_STRING", errors)
+    start_current = _parse_date_or_none(cfg.get("ACADEMIC_DATE_START_STRING"))
+    end_current = _parse_date_or_none(cfg.get("ACADEMIC_DATE_END_STRING"))
 
-    end_raw = str(cfg.get("ACADEMIC_DATE_END_STRING", ""))
-    end_current = _parse_date_or_none(end_raw) or date.today()
-    end_picked = st.date_input(
-        _label("ACADEMIC_DATE_END_STRING", "Academic year end", defaults),
-        value=end_current,
-        key="w_ACADEMIC_DATE_END_STRING",
-        help="Last day of the academic year (inclusive).",
+    # UI-only flag (not persisted): when OFF, show the AY dropdown; when ON,
+    # show the original pair of date pickers. Default to OFF unless cfg
+    # currently holds a non-standard span (then auto-flip ON so the user
+    # sees their actual dates instead of a silently-rounded dropdown pick).
+    if "ui_custom_ay_dates" not in st.session_state:
+        st.session_state["ui_custom_ay_dates"] = not _is_standard_academic_year(
+            start_current, end_current
+        )
+
+    custom_mode = st.toggle(
+        "Custom academic year dates",
+        value=bool(st.session_state["ui_custom_ay_dates"]),
+        key="ui_custom_ay_dates",
+        help="OFF: pick a standard Jul 1 – Jun 30 academic year from the list. "
+        "ON: choose any custom start and end dates.",
     )
-    cfg["ACADEMIC_DATE_END_STRING"] = end_picked.isoformat() if end_picked else ""
-    _render_errors("ACADEMIC_DATE_END_STRING", errors)
+
+    if not custom_mode:
+        # Anchor the option list on the current cfg start year so the user's
+        # saved AY appears even if it's outside the today-anchored window.
+        default_anchor = _default_anchor_year()
+        anchor = default_anchor
+        if (
+            start_current is not None
+            and start_current.month == 7
+            and start_current.day == 1
+            and start_current.year < default_anchor
+        ):
+            anchor = start_current.year
+        options = _academic_year_options(anchor_year=anchor)
+        labels = [o[0] for o in options]
+
+        # Pick the option whose start matches cfg; else default to index 0.
+        default_idx = 0
+        for i, (_, s, _e) in enumerate(options):
+            if start_current == s:
+                default_idx = i
+                break
+
+        picked_label = st.selectbox(
+            _label("ACADEMIC_DATE_START_STRING", "Academic year", defaults),
+            options=labels,
+            index=default_idx,
+            key="w_ACADEMIC_YEAR_CHOICE",
+            help="Standard Jul 1 – Jun 30 academic year.",
+        )
+        picked = next(o for o in options if o[0] == picked_label)
+        cfg["ACADEMIC_DATE_START_STRING"] = picked[1].isoformat()
+        cfg["ACADEMIC_DATE_END_STRING"] = picked[2].isoformat()
+        _render_errors("ACADEMIC_DATE_START_STRING", errors)
+        _render_errors("ACADEMIC_DATE_END_STRING", errors)
+    else:
+        start_default = start_current or date.today()
+        start_picked = st.date_input(
+            _label("ACADEMIC_DATE_START_STRING", "Academic year start", defaults),
+            value=start_default,
+            key="w_ACADEMIC_DATE_START_STRING",
+            help="First day of the academic year. All scheduling begins from this date.",
+        )
+        cfg["ACADEMIC_DATE_START_STRING"] = start_picked.isoformat() if start_picked else ""
+        _render_errors("ACADEMIC_DATE_START_STRING", errors)
+
+        end_default = end_current or date.today()
+        end_picked = st.date_input(
+            _label("ACADEMIC_DATE_END_STRING", "Academic year end", defaults),
+            value=end_default,
+            key="w_ACADEMIC_DATE_END_STRING",
+            help="Last day of the academic year (inclusive).",
+        )
+        cfg["ACADEMIC_DATE_END_STRING"] = end_picked.isoformat() if end_picked else ""
+        _render_errors("ACADEMIC_DATE_END_STRING", errors)
 
     # Fallback for PGY3 cutoff when enabling from empty: 14 days before
     # academic end. Avoids defaulting to today (which is out of range).
@@ -759,17 +864,6 @@ def _render_common_section(defaults: dict, errors: dict[str, list[str]]) -> None
     )
     _render_errors("SIMULATION_RUNS", errors)
 
-    cfg["USE_COMPLETED_CALLS"] = int(
-        st.toggle(
-            _label("USE_COMPLETED_CALLS", "Partial-year mode (seed from completed calls)", defaults),
-            value=bool(int(cfg.get("USE_COMPLETED_CALLS", 0))),
-            key="w_USE_COMPLETED_CALLS",
-            help="ON: seed from completed_calls.xlsx and generate from the next day. "
-            "OFF: generate a full year from scratch.",
-        )
-    )
-    _render_errors("USE_COMPLETED_CALLS", errors)
-
     cfg["INTERN_BLOCK1_WEEKDAY_CALLS"] = int(
         st.toggle(
             _label("INTERN_BLOCK1_WEEKDAY_CALLS", "Interns take weekday calls in Block 1", defaults),
@@ -780,6 +874,17 @@ def _render_common_section(defaults: dict, errors: dict[str, list[str]]) -> None
         )
     )
     _render_errors("INTERN_BLOCK1_WEEKDAY_CALLS", errors)
+
+    cfg["USE_COMPLETED_CALLS"] = int(
+        st.toggle(
+            _label("USE_COMPLETED_CALLS", "Partial-year mode (seed from completed calls)", defaults),
+            value=bool(int(cfg.get("USE_COMPLETED_CALLS", 0))),
+            key="w_USE_COMPLETED_CALLS",
+            help="ON: seed from completed_calls.xlsx and generate from the next day. "
+            "OFF: generate a full year from scratch.",
+        )
+    )
+    _render_errors("USE_COMPLETED_CALLS", errors)
 
 
 def _render_advanced_section(defaults: dict, errors: dict[str, list[str]]) -> None:
@@ -821,8 +926,6 @@ def _render_expert_section(defaults: dict, errors: dict[str, list[str]]) -> None
         "system — see README §Scoring."
     )
 
-    # Fairness thresholds + Night Float code live in Expert because they
-    # affect the internal ranking logic in non-obvious ways.
     def _num(key: str, label: str, help_text: str, min_value: int = 0):
         cfg[key] = int(
             st.number_input(
@@ -835,19 +938,6 @@ def _render_expert_section(defaults: dict, errors: dict[str, list[str]]) -> None
             )
         )
         _render_errors(key, errors)
-
-    _num("MAX_DIFF_SOFT", "Soft fairness threshold",
-         "Call-count gap that triggers the soft fairness flag in ranking.", min_value=1)
-    _num("MAX_DIFF_HARD", "Hard fairness threshold",
-         "Call-count gap that triggers the hard fairness flag.", min_value=1)
-
-    cfg["NIGHT_FLOAT_ROTATION_NAME"] = st.text_input(
-        _label("NIGHT_FLOAT_ROTATION_NAME", "Night Float rotation code", defaults),
-        value=str(cfg.get("NIGHT_FLOAT_ROTATION_NAME", "NF")),
-        key="w_NIGHT_FLOAT_ROTATION_NAME",
-        help="The exact name used for Night Float in the flow sheet (e.g. 'NF').",
-    )
-    _render_errors("NIGHT_FLOAT_ROTATION_NAME", errors)
 
     def _weight(key: str, label: str, help_text: str):
         cfg[key] = float(
@@ -875,6 +965,21 @@ def _render_expert_section(defaults: dict, errors: dict[str, list[str]]) -> None
             "Corrective: penalizes residents ahead of their expected call pace.")
     _weight("LOOKAHEAD_WEIGHT", "Lookahead weight",
             "Anticipatory: prefers residents with less remaining eligibility runway.")
+
+    # Fairness thresholds + Night Float code live in Expert because they
+    # affect the internal ranking logic in non-obvious ways.
+    _num("MAX_DIFF_SOFT", "Soft fairness threshold",
+         "Call-count gap that triggers the soft fairness flag in ranking.", min_value=1)
+    _num("MAX_DIFF_HARD", "Hard fairness threshold",
+         "Call-count gap that triggers the hard fairness flag.", min_value=1)
+
+    cfg["NIGHT_FLOAT_ROTATION_NAME"] = st.text_input(
+        _label("NIGHT_FLOAT_ROTATION_NAME", "Night Float rotation code", defaults),
+        value=str(cfg.get("NIGHT_FLOAT_ROTATION_NAME", "NF")),
+        key="w_NIGHT_FLOAT_ROTATION_NAME",
+        help="The exact name used for Night Float in the flow sheet (e.g. 'NF').",
+    )
+    _render_errors("NIGHT_FLOAT_ROTATION_NAME", errors)
 
     _render_rank_order(
         key="PICK_CANDIDATE_RANK_ORDER",
@@ -994,11 +1099,25 @@ def _seed_widget_state_from_config(cfg: dict) -> None:
     setting `st.session_state[wkey] = <typed default>` BEFORE the next
     rerun is the canonical fix and works for every widget type.
     """
-    # Dates: ACADEMIC_DATE_START / END are plain date pickers.
-    for key in ("ACADEMIC_DATE_START_STRING", "ACADEMIC_DATE_END_STRING"):
-        d = _parse_date_or_none(cfg.get(key))
-        if d is not None:
-            st.session_state[f"w_{key}"] = d
+    # Dates: ACADEMIC_DATE_START / END appear in either the dropdown
+    # (standard AY) or as date pickers (custom mode). Reset to dropdown
+    # mode whenever the saved span is a standard Jul 1 → Jun 30 pair.
+    start_d = _parse_date_or_none(cfg.get("ACADEMIC_DATE_START_STRING"))
+    end_d = _parse_date_or_none(cfg.get("ACADEMIC_DATE_END_STRING"))
+    standard = _is_standard_academic_year(start_d, end_d)
+    st.session_state["ui_custom_ay_dates"] = not standard
+    if standard:
+        # Seed the dropdown selection to the matching label.
+        anchor = min(start_d.year, _default_anchor_year())
+        for label, s, _e in _academic_year_options(anchor_year=anchor):
+            if s == start_d:
+                st.session_state["w_ACADEMIC_YEAR_CHOICE"] = label
+                break
+    else:
+        if start_d is not None:
+            st.session_state["w_ACADEMIC_DATE_START_STRING"] = start_d
+        if end_d is not None:
+            st.session_state["w_ACADEMIC_DATE_END_STRING"] = end_d
 
     # PGY3 cutoff: checkbox + (optional) date picker.
     cutoff = _parse_date_or_none(cfg.get("PGY3_CUTOFF_DATE"))
@@ -1554,7 +1673,7 @@ def _render_audit_view(result: dict) -> None:
 
     with st.expander(
         f"Errors ({len(errors)})" if errors else "Errors",
-        expanded=bool(errors),
+        expanded=False,
     ):
         if errors:
             for msg in errors:
@@ -1569,7 +1688,7 @@ def _render_audit_view(result: dict) -> None:
         else:
             st.caption("No warnings.")
 
-    with st.expander("Fairness summary", expanded=True):
+    with st.expander("Fairness summary", expanded=False):
         # Group the 7 keys * 3 stats from fairness_summary into a tidy
         # min/max/diff table by metric prefix.
         rows = []
@@ -1592,7 +1711,7 @@ def _render_audit_view(result: dict) -> None:
 
     with st.expander(
         f"Unassigned slots ({len(unassigned)})" if unassigned else "Unassigned slots",
-        expanded=bool(unassigned),
+        expanded=False,
     ):
         if unassigned:
             df = pd.DataFrame(unassigned)
@@ -1813,12 +1932,12 @@ def _render_results_section() -> None:
     _render_status_banner(result)
     _render_downloads()
 
-    with st.expander("Audit", expanded=True):
-        _render_audit_view(result)
     with st.expander("Call totals", expanded=True):
         _render_totals_table(result)
-    with st.expander("Call schedule", expanded=True):
+    with st.expander("Call schedule", expanded=False):
         _render_schedule_table(result)
+    with st.expander("Audit", expanded=False):
+        _render_audit_view(result)
 
 
 # ---------------------------------------------------------------------------

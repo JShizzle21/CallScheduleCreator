@@ -10,6 +10,15 @@
 
 **Guiding principle:** The primary user is a senior/junior resident who runs this 1–3 times per year and will not remember how it works between runs. Every field needs a label and tooltip. Every error message needs to be prose, not a stack trace.
 
+**Dev launch command** (run from a terminal — opens the GUI in the default browser at http://localhost:8501):
+
+```bash
+cd C:\Users\johnn\PycharmProjects\CallScheduleCreator
+.venv/Scripts/python.exe -m streamlit run app.py
+```
+
+Press `Ctrl+C` in the terminal to stop the server. End users will get a packaged `run.bat` (see §1) — this command is for development only.
+
 ---
 
 ## 1. Distribution & install model
