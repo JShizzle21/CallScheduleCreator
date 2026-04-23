@@ -235,8 +235,20 @@ def days_since_last_call(resident_data: dict, d: date) -> int:
 
 
 def is_post_call(resident_data, d):
+    """True if d is within POST_CALL_DAYS of any existing assignment, in
+    either direction.
+
+    Forward direction matters because `assigned_dates` may already contain
+    dates the greedy day loop hasn't processed yet — pre-applied holiday
+    assignments and (in partial-year mode) completed calls. Without the
+    forward check, the loop would happily place a candidate two days
+    before their pre-assigned holiday call, producing a schedule the
+    audit then has to flag.
+    """
     for i in range(1, POST_CALL_DAYS + 1):
         if (d - timedelta(days=i)) in resident_data["assigned_dates"]:
+            return True
+        if (d + timedelta(days=i)) in resident_data["assigned_dates"]:
             return True
     return False
 
