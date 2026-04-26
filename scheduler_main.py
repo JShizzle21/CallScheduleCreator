@@ -3,6 +3,7 @@ from __future__ import annotations
 import bisect
 import concurrent.futures
 import logging
+import os
 import random
 import sys
 import threading
@@ -10,6 +11,11 @@ import time
 from datetime import date, datetime, timedelta
 from functools import partial
 from typing import Callable, Dict, List, Tuple, Optional
+
+# All internal modules live in src/ — keep them off the project root to reduce
+# clutter for end users. Add src/ to the import path so existing flat-style
+# imports (`from config import X`) keep working without per-file changes.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
 
 from config import CONFIG, load_default_config, legacy_gui_config_warning
 from data_bundle import DataBundle, load_data_bundle

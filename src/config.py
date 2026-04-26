@@ -4,8 +4,12 @@ from pathlib import Path
 
 from ruamel.yaml import YAML
 
-CONFIG_PATH = "config.yaml"
-LEGACY_GUI_CONFIG_PATH = "gui_config.yaml"
+# Resolve config.yaml relative to this file (src/config.yaml), not cwd.
+# scheduler_main.py runs from project root with cwd=root, but the GUI is
+# launched via `streamlit run src/app.py` from project root too — and tests
+# invoke from various cwds. Anchoring to __file__ removes the ambiguity.
+CONFIG_PATH = str(Path(__file__).resolve().parent / "config.yaml")
+LEGACY_GUI_CONFIG_PATH = str(Path(__file__).resolve().parent.parent / "gui_config.yaml")
 
 REQUIRED_KEYS = [
     "ACADEMIC_DATE_START_STRING",

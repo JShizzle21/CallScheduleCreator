@@ -123,4 +123,5 @@ Source lives at: *(project repo URL)*. Architecture details are in `CLAUDE.md` (
 - `CLAUDE.md` — architecture, scheduler internals, scoring/ranking design.
 - `docs/gui_plan.md` — GUI design spec and as-built notes.
 - `tests/` — pytest suite. Run with `.venv/Scripts/python.exe -m pytest tests/`.
-- Dev launch (skips `run.bat`): `.venv/Scripts/python.exe -m streamlit run app.py` from the project root.
+- Dev launch (skips `run.bat`): `.venv/Scripts/python.exe -m streamlit run src/app.py` from the project root.
+- Project layout: end-user-facing files (`README.md`, `install.bat`, `run.bat`, `requirements.txt`, `scheduler_main.py`) live at the root; internal modules and `config.yaml` live in `src/`. `scheduler_main.py` and `src/app.py` each prepend the appropriate path to `sys.path` at import time, so existing flat imports (`from config import X`) work unchanged.

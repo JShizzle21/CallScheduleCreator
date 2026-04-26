@@ -20,7 +20,7 @@ setlocal EnableDelayedExpansion
 set "INSTALL_DIR=%LOCALAPPDATA%\CallScheduler"
 set "PY_EXE=%INSTALL_DIR%\python_embed\python.exe"
 set "PROJECT_DIR=%~dp0"
-set "APP_FILE=%PROJECT_DIR%app.py"
+set "APP_FILE=%PROJECT_DIR%src\app.py"
 
 REM --- Step 1: Clean up old temp upload directories ---------------------------
 REM 7-day-old tmp* dirs from prior sessions. Streamlit's tempfile.mkdtemp dirs
@@ -45,7 +45,7 @@ if not exist "%PY_EXE%" (
 
 if not exist "%APP_FILE%" (
     echo [ERROR] app.py not found at %APP_FILE%
-    echo  This launcher must live in the project folder alongside app.py.
+    echo  This launcher must live in the project folder alongside the src\ subfolder.
     pause
     exit /b 1
 )

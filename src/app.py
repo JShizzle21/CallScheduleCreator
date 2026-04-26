@@ -18,9 +18,11 @@ Runtime notes:
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import re
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -30,6 +32,12 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Optional
+
+# scheduler_main lives at the project root (one level up from src/).
+# Streamlit puts the script's own directory (src/) on sys.path automatically,
+# but not the parent — add it explicitly so `from scheduler_main import ...`
+# below works regardless of how app.py is launched.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pandas as pd
 import streamlit as st

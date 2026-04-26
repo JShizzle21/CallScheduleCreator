@@ -14,7 +14,7 @@
 
 ```bash
 cd C:\Users\johnn\PycharmProjects\CallScheduleCreator
-.venv/Scripts/python.exe -m streamlit run app.py
+.venv/Scripts/python.exe -m streamlit run src/app.py
 ```
 
 Press `Ctrl+C` in the terminal to stop the server. End users will get a packaged `run.bat` (see §1) — this command is for development only.
@@ -45,7 +45,7 @@ Each step is idempotent — re-running skips work that's already done. Downloads
 1. Cleans up `%TEMP%\tmp*` directories older than 7 days (Streamlit doesn't fire a session-end hook so upload staging dirs accumulate).
 2. Verifies `%LOCALAPPDATA%\CallScheduler\python_embed\python.exe` exists; if not, prompts user to run install.bat first.
 3. Scans for the first free port in 8501-8520 via `netstat -an | findstr LISTENING`. Aborts with a friendly message if all 20 are taken.
-4. Starts Streamlit headless on that port: `python -m streamlit run app.py --server.port=<P> --server.headless=true --browser.gatherUsageStats=false --server.fileWatcherType=none`.
+4. Starts Streamlit headless on that port: `python -m streamlit run src\app.py --server.port=<P> --server.headless=true --browser.gatherUsageStats=false --server.fileWatcherType=none`.
 5. Opens the user's default browser to `http://localhost:<P>` after a 4-second delay (gives the server time to bind).
 6. Server runs in the foreground of the terminal window — closing the window or Ctrl+C stops it.
 
