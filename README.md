@@ -9,14 +9,16 @@ A Windows desktop app that builds a year-long medical residency call schedule fr
 1. **Copy the entire project folder** to your computer (anywhere — Desktop, Documents, etc.). Keep all files together.
 2. **Double-click `install.bat`.** A console window opens and runs for ~5 minutes the first time. Wait for the `Setup complete.` message, then close the window.
 3. **Double-click `run.bat`** whenever you want to use the app. Your default browser opens automatically after a few seconds.
-4. **Close the console window** to stop the app when done.
+4. **Stop the app** when done — easiest is the **Exit** button at the top right of the browser page (it shuts down the server cleanly). You can also just close the console window.
+
+To uninstall, double-click **`uninstall.bat`** — it removes the embedded Python and ~400 MB of dependencies from `%LOCALAPPDATA%\CallScheduler\`. The project folder itself you delete by hand from Explorer.
 
 > First-launch warnings you may see — these are normal:
 > - **Windows SmartScreen** ("Windows protected your PC"): click "More info" → "Run anyway."
 > - **Windows Defender Firewall** ("allow Python to communicate"): tick **Private networks** and click Allow.
 > - **Antivirus** flag on `.bat` files: add the project folder to your AV's exclusions if needed.
 
-If you ever need a clean reinstall, delete the folder `%LOCALAPPDATA%\CallScheduler` (paste that into the Windows Run dialog) and rerun `install.bat`.
+If you ever need a clean reinstall, double-click `uninstall.bat`, then `install.bat`.
 
 ---
 
@@ -100,7 +102,7 @@ If you do change weights and find a setting you like, click **"Save as defaults"
 - **Port conflict:** `run.bat` automatically tries 8501 through 8520. If all are taken, close other apps and retry.
 - **`run.bat` says Python is not installed:** you skipped `install.bat`. Double-click it first.
 - **`install.bat` fails with download errors:** corporate firewall or antivirus blocking `python.org` / `pypi.org`. Get IT to whitelist them, or run the installer on an unrestricted network.
-- **Anything else:** delete `%LOCALAPPDATA%\CallScheduler` (use Windows Run dialog), rerun `install.bat`.
+- **Anything else:** double-click `uninstall.bat`, then `install.bat`.
 
 ### Where do I get help with the code?
 
@@ -113,7 +115,7 @@ Source lives at: *(project repo URL)*. Architecture details are in `CLAUDE.md` (
 | Location | Contents | Safe to delete? |
 |---|---|---|
 | Project folder (this directory) | Source code, your input files (`data/`), output files (`data/output/`) | Backup `data/` first. Everything else is replaceable from the repo. |
-| `%LOCALAPPDATA%\CallScheduler\` | Embedded Python + dependencies (~400 MB) | Yes — `install.bat` will recreate it. Use this if anything seems broken. |
+| `%LOCALAPPDATA%\CallScheduler\` | Embedded Python + dependencies (~400 MB) | Yes — use `uninstall.bat` (then `install.bat` to recreate). |
 | `%TEMP%\tmp*` | Streamlit upload staging dirs | Yes — `run.bat` cleans up dirs older than 7 days at startup. |
 
 ---

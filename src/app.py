@@ -1975,11 +1975,37 @@ def main() -> None:
     # rendering any section, so the Run section sees the freshest state.
     _drain_queue()
 
-    header_cols = st.columns([6, 1])
+    header_cols = st.columns([5, 1, 1])
     header_cols[0].title("Call Schedule Creator")
     if header_cols[1].button("Reset session"):
         _reset_session()
         st.rerun()
+    # Exit button: explicit shutdown so non-technical users don't have
+    # the asymmetric "close browser, terminal still alive in the background"
+    # experience. Requires a confirm step because os._exit kills the process
+    # immediately — if a run is in flight, the user would lose it.
+    if header_cols[2].button("Exit", type="secondary"):
+        st.session_state["_confirm_exit"] = True
+        st.rerun()
+
+    if st.session_state.get("_confirm_exit"):
+        st.warning(
+            "Click **Confirm exit** to shut down the app. The browser tab "
+            "will stop responding once the server stops — close it manually. "
+            "Any unsaved settings or in-progress runs will be lost."
+        )
+        confirm_cols = st.columns([1, 1, 6])
+        if confirm_cols[0].button("Confirm exit", type="primary"):
+            # os._exit bypasses cleanup hooks — that's intentional. Streamlit's
+            # tornado server doesn't expose a graceful shutdown API from inside
+            # a script, and sys.exit/SystemExit gets caught by Streamlit's own
+            # exception handler (the script just reruns). os._exit is the only
+            # reliable way to terminate the python.exe spawned by run.bat.
+            import os as _os
+            _os._exit(0)
+        if confirm_cols[1].button("Cancel"):
+            st.session_state["_confirm_exit"] = False
+            st.rerun()
 
     with st.expander("1. Upload input files", expanded=False):
         for slot in UPLOAD_SLOTS:
