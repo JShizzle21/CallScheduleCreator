@@ -16,6 +16,7 @@ from data_bundle import DataBundle, load_data_bundle
 from errors import ConfigError, DataValidationError, ScheduleError
 from exports import write_call_totals_xlsx, write_call_schedule_xlsx, write_audit
 from loader import load_completed_calls
+import validation
 from validation import validate_rotations_against_rules, validate_no_call_days, audit_schedule
 
 logger = logging.getLogger(__name__)
@@ -187,6 +188,11 @@ def _apply_config(config: dict) -> None:
             f"Invalid MONTE_CARLO_SCORE_ORDER entries: {invalid_score_keys}. "
             f"Valid options are: {sorted(VALID_MONTE_CARLO_SCORE_KEYS)}"
         )
+
+    # Refresh validation.py's module-level constants too — the audit reads
+    # PGY3_CUTOFF_DATE etc. from validation's own globals, so without this
+    # call GUI config overrides are silently ignored at audit time.
+    validation._apply_config(config)
 
     PICK_CANDIDATE_RANK_ORDER = list(
         config.get("PICK_CANDIDATE_RANK_ORDER", _DEFAULT_PICK_CANDIDATE_RANK_ORDER)

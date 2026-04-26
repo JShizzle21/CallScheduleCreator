@@ -1,5 +1,20 @@
-openpyxl>=3.1
-ruamel.yaml>=0.18
-# streamlit 1.38+ needed for st.rerun() and modern session_state API.
-streamlit>=1.38
-pytest>=8.0
+# Runtime dependencies for the Call Schedule Creator GUI + CLI.
+#
+# Versions are pinned to the dev environment used to validate the app
+# (Python 3.14.3 on Windows). When upgrading, re-run `pytest tests/`
+# AND launch the GUI before committing — Streamlit and pyarrow have a
+# history of subtle breaking changes between minor versions.
+#
+# To rebuild requirements from a fresh venv after deliberate upgrades:
+#   .venv/Scripts/python.exe -m pip install --upgrade streamlit openpyxl ruamel.yaml pandas
+#   .venv/Scripts/python.exe -m pip freeze > requirements.lock.txt   # full transitive snapshot
+# Then hand-pick the top-level entries below.
+
+# --- Top-level (directly imported) ---
+streamlit==1.56.0
+openpyxl==3.1.5
+ruamel.yaml==0.19.1
+pandas==3.0.2
+
+# --- Dev only (not needed for end-user install) ---
+# pytest==9.0.3

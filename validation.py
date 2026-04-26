@@ -7,6 +7,13 @@ from config import CONFIG
 
 from typing import Optional
 
+# IMPORTANT: any new module-level constant added below that reads from
+# CONFIG must ALSO be refreshed inside `_apply_config()`. Otherwise the
+# value will go stale whenever the GUI passes an updated config dict to
+# the scheduler — the audit will silently use the import-time value from
+# config.yaml instead of the user's overrides. (Regression history:
+# PGY3_CUTOFF_DATE drifted this way and produced false audit errors.)
+
 DATA_DIR = CONFIG.get("DATA_DIR", "data")
 OUTPUT_DIR = CONFIG.get("OUTPUT_DIR", "output")
 POST_CALL_DAYS = CONFIG.get("POST_CALL_DAYS", 2)
@@ -18,15 +25,44 @@ ACADEMIC_DATE_END = datetime.strptime(ACADEMIC_DATE_END_STRING, "%Y-%m-%d").date
 
 # Import PGY3 cutoff for audit checking.  Parsed the same way as in
 # scheduler_main to avoid import-cycle dependency.
-_pgy3_cutoff_raw = CONFIG.get("PGY3_CUTOFF_DATE", "")
 PGY3_CUTOFF_DATE: Optional[date] = None
-if _pgy3_cutoff_raw and str(_pgy3_cutoff_raw).strip():
-    try:
-        _parsed = datetime.strptime(str(_pgy3_cutoff_raw).strip(), "%Y-%m-%d").date()
-        if ACADEMIC_DATE_START <= _parsed <= ACADEMIC_DATE_END:
-            PGY3_CUTOFF_DATE = _parsed
-    except ValueError:
-        pass
+
+
+def _apply_config(config: dict) -> None:
+    """Refresh module-level audit constants from `config`.
+
+    Mirrors `scheduler_main._apply_config`. Called by the scheduler whenever
+    a new config is applied so the audit uses the same values as the
+    schedule it audits — without this, GUI overrides (e.g. disabling the
+    PGY3 cutoff) get ignored and the audit reports false errors based on
+    the stale config.yaml value parsed at import time.
+    """
+    global DATA_DIR, OUTPUT_DIR, POST_CALL_DAYS, INTERN_BLOCK1_WEEKDAY_CALLS
+    global ACADEMIC_DATE_START_STRING, ACADEMIC_DATE_END_STRING
+    global ACADEMIC_DATE_START, ACADEMIC_DATE_END, PGY3_CUTOFF_DATE
+
+    DATA_DIR = config.get("DATA_DIR", "data")
+    OUTPUT_DIR = config.get("OUTPUT_DIR", "output")
+    POST_CALL_DAYS = int(config.get("POST_CALL_DAYS", 2))
+    INTERN_BLOCK1_WEEKDAY_CALLS = int(config.get("INTERN_BLOCK1_WEEKDAY_CALLS", 0))
+    ACADEMIC_DATE_START_STRING = config.get("ACADEMIC_DATE_START_STRING", "2026-07-01")
+    ACADEMIC_DATE_END_STRING = config.get("ACADEMIC_DATE_END_STRING", "2027-06-30")
+    ACADEMIC_DATE_START = datetime.strptime(ACADEMIC_DATE_START_STRING, "%Y-%m-%d").date()
+    ACADEMIC_DATE_END = datetime.strptime(ACADEMIC_DATE_END_STRING, "%Y-%m-%d").date()
+
+    _pgy3_cutoff_raw = config.get("PGY3_CUTOFF_DATE", "")
+    PGY3_CUTOFF_DATE = None
+    if _pgy3_cutoff_raw and str(_pgy3_cutoff_raw).strip():
+        try:
+            _parsed = datetime.strptime(str(_pgy3_cutoff_raw).strip(), "%Y-%m-%d").date()
+            if ACADEMIC_DATE_START <= _parsed <= ACADEMIC_DATE_END:
+                PGY3_CUTOFF_DATE = _parsed
+        except ValueError:
+            pass
+
+
+# Populate at import time so direct CLI use (no GUI) still works.
+_apply_config(CONFIG)
 
 
 def is_weekend(d: date) -> bool:

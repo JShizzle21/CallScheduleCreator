@@ -24,23 +24,30 @@ Press `Ctrl+C` in the terminal to stop the server. End users will get a packaged
 ## 1. Distribution & install model
 
 ### What lives on OneDrive/Teams
-- Source code (the whole project folder except `.venv/` and `data/output/`)
-- `python-embed/` — bundled embeddable Python 3.11 distribution (~30 MB). Removes the user-facing Python install dependency entirely. Included in the OneDrive folder.
-- `install.bat` (one-time setup)
-- `run.bat` (double-click to launch the app)
-- `README.md` (the handoff doc — see §6)
+- Source code (the whole project folder except `.venv/` and `data/output/`).
+- `install.bat` (one-time setup — downloads embeddable Python on first run).
+- `run.bat` (double-click to launch the app).
+- `README.md` (the handoff doc — see §6).
 
-### What install.bat does
-1. Use the bundled `python-embed\python.exe` (no system Python required).
-2. Create `%LOCALAPPDATA%\CallScheduler\venv` (not in the project folder — prevents OneDrive sync corruption).
-3. `pip install -r requirements.txt` into that venv.
-4. Print "Setup complete. Double-click run.bat to start."
+> **As-built note:** the original plan called for shipping `python-embed/` *inside* the OneDrive folder. Phase 6 implementation chose a different approach: install.bat downloads embeddable Python 3.14.3 from python.org into `%LOCALAPPDATA%\CallScheduler\python_embed\` on first run. Rationale: (a) ~300MB of pyarrow/pandas wheels lands in the same place — keeping all of it off OneDrive avoids sync churn AND avoids syncing the binaries to every other user's machine, (b) install.bat becomes idempotent (delete `%LOCALAPPDATA%\CallScheduler` to force clean reinstall), (c) the OneDrive folder stays small (source + data + .bat files only). Trade-off: first install requires internet access to python.org and pypi.org.
 
-### What run.bat does
-1. Activate the local venv.
-2. Start Streamlit: `streamlit run app.py --server.headless=true`.
-3. Open the browser automatically to `http://localhost:8501`.
-4. When the terminal window is closed, the server stops and session uploaded files are discarded (config overrides persist on disk — see §4.5).
+### What install.bat does (as built)
+1. Creates `%LOCALAPPDATA%\CallScheduler\` (off OneDrive — avoids sync churn on the ~300 MB of dependency wheels).
+2. Downloads `python-3.14.3-embed-amd64.zip` from python.org and extracts to `%LOCALAPPDATA%\CallScheduler\python_embed\`.
+3. Edits `python314._pth` to uncomment `import site` (otherwise pip-installed packages are unimportable — embeddable distribution quirk).
+4. Downloads `get-pip.py` from `bootstrap.pypa.io` and bootstraps pip.
+5. Runs `pip install -r requirements.txt` against the embedded interpreter.
+6. Prints "Setup complete. Double-click run.bat to start."
+
+Each step is idempotent — re-running skips work that's already done. Downloads use `curl` (bundled with Win10 1803+) with PowerShell fallback.
+
+### What run.bat does (as built)
+1. Cleans up `%TEMP%\tmp*` directories older than 7 days (Streamlit doesn't fire a session-end hook so upload staging dirs accumulate).
+2. Verifies `%LOCALAPPDATA%\CallScheduler\python_embed\python.exe` exists; if not, prompts user to run install.bat first.
+3. Scans for the first free port in 8501-8520 via `netstat -an | findstr LISTENING`. Aborts with a friendly message if all 20 are taken.
+4. Starts Streamlit headless on that port: `python -m streamlit run app.py --server.port=<P> --server.headless=true --browser.gatherUsageStats=false --server.fileWatcherType=none`.
+5. Opens the user's default browser to `http://localhost:<P>` after a 4-second delay (gives the server time to bind).
+6. Server runs in the foreground of the terminal window — closing the window or Ctrl+C stops it.
 
 ### Failure modes to handle gracefully
 - Bundled `python-embed/` missing → install.bat tells user to re-copy project from OneDrive.

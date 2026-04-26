@@ -1,5 +1,13 @@
 """End-to-end smoke test against the real data files.
 
+NOTE on the xfail markers below: they are `strict=True` on purpose. The
+known failures are due to placeholder data in `data/clinic_days.xlsx`.
+Once real clinic data is published and the underlying constraint
+relaxes, these tests will start passing — pytest will then fail them
+with XPASSED, forcing you to delete the marker. Self-clearing reminder.
+
+
+
 Runs `generate_schedule_once(seed=0)` against `data/*.xlsx` exactly as the
 production scheduler would, then asserts the high-level invariants every
 shipped schedule must satisfy:
@@ -62,7 +70,7 @@ def schedule_result():
 
 
 @pytest.mark.xfail(
-    strict=False,
+    strict=True,
     reason=(
         "data/clinic_days.xlsx currently contains placeholder data — Feb 11, "
         "2027 is over-constrained (11 residents have clinic on Feb 12, plus "
@@ -82,7 +90,7 @@ def test_audit_reports_no_hard_errors(schedule_result):
 
 
 @pytest.mark.xfail(
-    strict=False,
+    strict=True,
     reason=(
         "Same root cause as test_audit_reports_no_hard_errors — Feb 11, "
         "2027 has no eligible upper given placeholder clinic_days.xlsx. "
