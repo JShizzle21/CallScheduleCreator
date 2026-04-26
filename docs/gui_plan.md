@@ -44,9 +44,43 @@ Press `Ctrl+C` in the terminal to stop the server. End users will get a packaged
 
 ### Failure modes to handle gracefully
 - Bundled `python-embed/` missing → install.bat tells user to re-copy project from OneDrive.
-- Port 8501 in use → try 8502, 8503, etc.
+- Port 8501 in use → try 8502, 8503, etc. Streamlit accepts `--server.port` but does not auto-fallback; run.bat needs to scan for a free port (e.g. `netstat -an | findstr :8501`) and pass the first free one explicitly.
 - Venv missing → run.bat prompts user to run install.bat first.
 - Corrupt `gui_config.yaml` (§4.5) → log warning, delete it, fall back to defaults.
+
+### Phase 6 implementation notes (gotchas confirmed during dev testing)
+
+These are the non-obvious things that will bite while building install.bat / run.bat. Capture them here so the implementer doesn't re-discover each one from scratch.
+
+**Embeddable Python:**
+- Ships **without `pip`** — install.bat must download `get-pip.py` (`https://bootstrap.pypa.io/get-pip.py`) and run it against `python-embed\python.exe` to bootstrap pip before any `pip install` works.
+- Ships with `python311._pth` that **blocks `site-packages`** by default. install.bat must edit `python311._pth` and uncomment the `import site` line, otherwise pip-installed packages won't be importable at runtime.
+
+**Streamlit first-launch:**
+- Telemetry prompt hangs the terminal waiting for an email address. Pre-create `.streamlit/config.toml` in the project root with:
+  ```toml
+  [browser]
+  gatherUsageStats = false
+  [server]
+  headless = true
+  ```
+  Ship this file with the source so the prompt never appears.
+
+**Windows Firewall:**
+- First time Python opens port 8501, Windows Defender Firewall pops a permission dialog. Users will instinctively click "Block." README must include a screenshot + "click Allow on private networks" instruction.
+
+**Temp directory cleanup:**
+- The GUI calls `tempfile.mkdtemp()` per browser session for uploaded-file staging. Streamlit doesn't fire a reliable session-end hook (browser close ≠ session end), so these dirs accumulate in `%TEMP%`. Add an explicit cleanup step at the top of `run.bat`:
+  ```bat
+  forfiles /p "%TEMP%" /m "tmp*" /d -7 /c "cmd /c rmdir /s /q @path" 2>nul
+  ```
+  Or do it in Python at app startup (safer — only deletes dirs we know we created, by checking for a sentinel file we drop into each one).
+
+### Deferred (post-Phase-6 polish)
+
+**README handoff doc (§6):** intentionally deferred until install.bat / run.bat are working and dogfooded on a clean Windows machine. Doing it earlier means rewriting it once the install steps stabilize.
+
+**GUI logic test coverage:** zero unit-tests today on `app.py` validators, `_seed_widget_state_from_config`, `_build_paths_from_uploads`, `_preflight_completed_assignments`, the queue/log handler. `streamlit.testing.v1.AppTest` (Streamlit ≥1.28) provides a programmatic API for driving the app: instantiate `AppTest.from_file("app.py")`, set widget values, click buttons, then assert on session_state and rendered elements. Worth a few hours after Phase 6 settles to lock in the upload-validator, reset-to-defaults, and run-lifecycle behaviors.
 
 ---
 

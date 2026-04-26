@@ -39,24 +39,16 @@ INTERN_BLOCK1_WEEKDAY_CALLS: 1
 PGY3_CUTOFF_DATE: "2027-06-14"
 
 # Number of times to run the simulation in order to get the best Monte Carlo score
-SIMULATION_RUNS: 500
+SIMULATION_RUNS: 1000
 
 # Name in the flow Excel document
 NIGHT_FLOAT_ROTATION_NAME: "NF"
 
 # ---------------------------------------
-# Call Scheduler Configuration
-# ---------------------------------------
-#Multiplier to score calculation if on an "avoid" rotation
-#AVOID_WEIGHT: 1.5
-
-# ---------------------------------------
 # Spacing Rules
 # ---------------------------------------
-#Number in days in which a penalty should be applied to avoid a call
-#Ex. Really avoid scheduling a call within 7 days, and try to avoid within 14 days
-
-#Days specified
+# Number in days in which a penalty should be applied to avoid a call
+# Ex. Really avoid scheduling a call within 7 days, and try to avoid within 14 days
 MIN_SPACING_DAYS_STRONG: 7
 MIN_SPACING_DAYS_MILD: 14
 
@@ -67,27 +59,11 @@ MIN_SPACING_DAYS_MILD: 14
 MAX_CALLS_IN_WINDOW: 3
 ROLLING_WINDOW_DAYS: 14
 
-#Multiplier values
-#SPACING_WEIGHT: 2.0
-
-# ---------------------------------------
-# PGY2 / PGY3 Year Balancing
-# ---------------------------------------
-#Multiplier to prioritize "front-loading" the year with PGY3 and "backloading" with PGY2
-#1 means no balancing occurs
-#YEAR_WEIGHT: 2.0
-
 # ---------------------------------------
 # Fairness Tightness
 # ---------------------------------------
-#Multipliers to score calculations
-#General multiplier that exacerbates decreasing different call numbers
-#FAIRNESS_WEIGHT: 2.0
-#Multiplier when "max_diff_soft" difference in call numbers reached
-#SOFT_DIFF_MULTIPLIER: 1.5
-#Multiplier when "max_diff_soft" difference in call numbers reached
-#HARD_DIFF_MULTIPLIER: 3.0
-
+# Call-count gaps that trigger soft / hard fairness flags during candidate
+# ranking. See README §Scoring.
 MAX_DIFF_SOFT: 3
 MAX_DIFF_HARD: 4
 

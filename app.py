@@ -1363,6 +1363,21 @@ def _run_simulation_thread(
             from scheduler_main import export_result
             try:
                 export_result(result, paths=paths)
+            except PermissionError as exc:
+                # Windows file lock: user has call_schedule.xlsx (or one
+                # of the other outputs) open in Excel, which blocks the
+                # rewrite. Surface a humane fix rather than a stack trace.
+                q.put_nowait({
+                    "type": "error",
+                    "message": (
+                        "Could not write output files because one of them "
+                        "is open in Excel. Close call_schedule.xlsx, "
+                        "call_totals.xlsx, and audit_report.txt, then run "
+                        f"again. (Underlying error: {exc})"
+                    ),
+                    "trace": traceback.format_exc(),
+                })
+                return
             except Exception as exc:
                 q.put_nowait({
                     "type": "error",
