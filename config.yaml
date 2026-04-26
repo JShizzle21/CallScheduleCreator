@@ -36,10 +36,10 @@ INTERN_BLOCK1_WEEKDAY_CALLS: 1
 # shifts. Omit or leave blank to disable (defaults to ACADEMIC_DATE_END + 1,
 # i.e. no cutoff). If the date is outside the academic year a warning is
 # printed and the cutoff is disabled.
-PGY3_CUTOFF_DATE: "2027-06-17"
+PGY3_CUTOFF_DATE: "2027-06-14"
 
 # Number of times to run the simulation in order to get the best Monte Carlo score
-SIMULATION_RUNS: 1000
+SIMULATION_RUNS: 500
 
 # Name in the flow Excel document
 NIGHT_FLOAT_ROTATION_NAME: "NF"

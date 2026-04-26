@@ -61,6 +61,55 @@ def test_save_config_missing_file_raises(tmp_path):
         save_config({"FAIRNESS_GAP_WEIGHT": 1.0}, path=str(missing))
 
 
+def test_save_config_preserves_block_style_lists_and_trailing_comments(tmp_path):
+    """Reordering a list value via save_config (the GUI's rank-order
+    ▲/▼ buttons do exactly this) must not flatten the list to flow style
+    or drop the section-header comment that lives between this list's
+    last item and the next top-level key.
+
+    Regression test: prior to the in-place-mutation + ca-restore fix in
+    save_config, replacing a CommentedSeq's contents wiped the trailing
+    comment metadata, deleting any documentation block ruamel had
+    attached to the previous key's last item.
+    """
+    cfg = tmp_path / "config.yaml"
+    _write(
+        cfg,
+        "FIRST_LIST:\n"
+        "  - alpha\n"
+        "  - beta\n"
+        "  - gamma\n"
+        "\n"
+        "# ---------------------------------------\n"
+        "# Section header comment for the next key\n"
+        "# ---------------------------------------\n"
+        "\n"
+        "SECOND_LIST:\n"
+        "  - one\n"
+        "  - two\n",
+    )
+
+    # Reorder FIRST_LIST exactly as the GUI's ▲/▼ buttons would.
+    save_config({"FIRST_LIST": ["gamma", "alpha", "beta"]}, path=str(cfg))
+
+    text = cfg.read_text(encoding="utf-8")
+
+    # Section-header comment block must survive.
+    assert "# Section header comment for the next key" in text, (
+        f"Trailing comment was dropped. File content:\n{text}"
+    )
+
+    # List must remain block-indented (`  - item`), not flat (`- item`).
+    assert "  - gamma" in text, (
+        f"List items lost their indentation. File content:\n{text}"
+    )
+
+    # Reorder actually applied.
+    loaded = load_config(str(cfg))
+    assert loaded["FIRST_LIST"] == ["gamma", "alpha", "beta"]
+    assert loaded["SECOND_LIST"] == ["one", "two"]
+
+
 def test_save_config_ignores_extra_keys_not_in_file(tmp_path):
     """save_config adds new keys — callers are trusted to pass valid keys.
 

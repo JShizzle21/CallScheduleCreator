@@ -58,9 +58,17 @@ def _safe_yaml() -> YAML:
 
 
 def _round_trip_yaml() -> YAML:
-    """YAML instance that preserves comments and formatting on dump."""
+    """YAML instance that preserves comments and formatting on dump.
+
+    `indent(mapping=2, sequence=4, offset=2)` matches the indentation style
+    of the hand-written config.yaml — list items appear as `  - item` with
+    the dash at column 2. Without this, ruamel defaults to flat style
+    (`- item` at column 0), which round-trips comments correctly but
+    visually rewrites every list in the file.
+    """
     y = YAML()
     y.preserve_quotes = True
+    y.indent(mapping=2, sequence=4, offset=2)
     return y
 
 
@@ -124,7 +132,31 @@ def save_config(values: dict, path: str = CONFIG_PATH) -> None:
         data = y.load(f)
 
     for key, value in values.items():
-        data[key] = value
+        existing = data.get(key)
+        # Lists need in-place mutation, not reassignment, to preserve
+        # ruamel.yaml's CommentedSeq wrapper — it carries the original
+        # block style (one item per line, indented) and any inline or
+        # trailing comments. Plain `data[key] = [...]` replaces the
+        # CommentedSeq with a bare Python list, which ruamel then dumps
+        # in flow style and drops adjacent section-header comments.
+        if isinstance(existing, list) and isinstance(value, list):
+            # Snapshot the CommentedSeq's per-item comment metadata, do
+            # the in-place replacement, then restore it. Slice-assign
+            # (`existing[:] = ...`) wipes existing.ca.items, which is
+            # where ruamel stores trailing comments — and those trailing
+            # comments often belong to the *next* top-level key's section
+            # header (e.g. the "# Pick-candidate rank priority" block
+            # that lives between MONTE_CARLO_SCORE_ORDER's last item and
+            # PICK_CANDIDATE_RANK_ORDER). Without this restore, every
+            # save erases those headers.
+            saved_ca_items = None
+            if hasattr(existing, "ca") and existing.ca.items:
+                saved_ca_items = dict(existing.ca.items)
+            existing[:] = value
+            if saved_ca_items and hasattr(existing, "ca"):
+                existing.ca.items.update(saved_ca_items)
+        else:
+            data[key] = value
 
     with open(p, "w", encoding="utf-8") as f:
         y.dump(data, f)
