@@ -15,3 +15,12 @@ __pycache__/
 # Virtual environments
 .venv/
 venv/
+
+# .bat script artifacts (logs, redirected output, partial downloads)
+*.log
+install.log
+get-pip.py
+python-embed.zip
+
+# Streamlit local cache (if user creates a project-local .streamlit/)
+.streamlit/secrets.toml
