@@ -24,25 +24,135 @@ If you ever need a clean reinstall, double-click `uninstall.bat`, then `install.
 
 ## What you need to prepare
 
-All input files live in the `data/` folder. You can edit them in Excel; close the file before running the app (Excel locks open files).
+All input files live in the `data/` folder. You can edit them in Excel; **close the file before running the app** (Excel locks open files). The app also accepts uploads in the GUI — those override the files in `data/` for that run only.
 
-### Required (4)
+> **Date format flexibility.** Every date column accepts any of these formats interchangeably, and Excel-native date cells are always accepted:
+> `2026-07-01`, `7/1/2026`, `7/1/26`, `July 1 2026`, `July 1, 2026`, `1-Jul-2026`, `Jul 1, 2026`, `1 July 2026`. Use whichever is easiest in your workflow.
 
-| File | What it holds |
-|---|---|
-| **`flow.xlsx`** | Block calendar — each resident's rotation for each ~2-week block of the academic year. Sheet name `master_block_calendar`. Row 2 = block start dates; column A = resident names; cells = rotation codes (`WARDS`, `ED`, `NF`, etc.). PGY cohorts are separated by rows containing date-like cells. |
-| **`rotation_rules.xlsx`** | For each `(rotation, PGY level)` pair: whether they take call (`AVOID`, `NO_CALL`, etc.). |
-| **`no_call_days.xlsx`** | Per-resident days off (vacation, conferences). Columns: `name`, `date`. |
-| **`holidays.xlsx`** | Holiday dates with optional manual upper/intern assignments. Blank cells will be flagged as unassigned in the output for you to fill in by hand before shipping. |
+> **Resident names must match exactly** across all input files (case-sensitive). `Prabhu` is not the same as `prabhu`. The flow sheet is the source of truth; if a name appears in another file but not in `flow.xlsx`, the app will stop with an error pointing at the offending row.
 
-### Optional (2)
+> **Tip:** the files currently in `data/` are real working examples. Copy one as a template rather than starting from scratch.
 
-| File | What it holds |
-|---|---|
-| **`clinic_days.xlsx`** | Clinic days. The day BEFORE each clinic is automatically blocked as a no-call day. Leave the file empty or omit it if you don't track clinics. |
-| **`completed_calls.xlsx`** | Mid-year handoff: existing assignments to seed from. Only used when "Partial year" is enabled in the GUI. |
+---
 
-> **Tip:** the files currently in `data/` are working examples. Copy one and edit, rather than starting from scratch.
+### Required input files
+
+#### 1. `flow.xlsx` — rotation block calendar
+
+Defines which rotation each resident is on for each ~2-week block of the academic year.
+
+- **Sheet name:** `master_block_calendar`
+- **Row 1:** ignored (free-form header).
+- **Row 2:** **block start dates** in columns B onward. One date per block — typically 13 blocks for a 12-month academic year. The block ends the day before the next block's start date (or the academic-year end date for the last block).
+- **Column A (row 3+):** resident names, one per row, grouped by PGY cohort (PGY1 first, then PGY2, then PGY3).
+- **Cells (row 3+ × column B+):** rotation codes that match `rotation_rules.xlsx` — e.g. `WARDS`, `ED`, `NF`, `ICU`, `ELECTIVE`.
+- **PGY separator rows:** a row in which column A is blank/non-name and at least three cells in columns B+ are date-like values. The app uses these to detect cohort boundaries. The first separator ends PGY1 / starts PGY2; the second ends PGY2 / starts PGY3.
+- **Split blocks:** a cell value like `WARDS/ED` means the resident is on `WARDS` for the first ~2 weeks of the block and `ED` for the second ~2 weeks.
+
+Example layout:
+
+| A | B | C | D | ... |
+|---|---|---|---|---|
+| | 2026-07-01 | 2026-07-15 | 2026-07-29 | ... |
+| McMurray | WARDS | ED | NF | ... |
+| Lovell | ICU | WARDS | ELECTIVE/WARDS | ... |
+| *(PGY2 separator row with dates)* | | | | |
+| Avila | WARDS | NF | ED | ... |
+
+#### 2. `rotation_rules.xlsx` — call eligibility per rotation × PGY
+
+Tells the scheduler which rotations may take call at each PGY level.
+
+- **Columns (row 1 = header):** `rotation_name`, `pgy`, `preference`
+- **Values:**
+  - `ELIGIBLE` — can take call.
+  - `AVOID` — eligible, but try not to assign (only used when no `ELIGIBLE` candidate exists).
+  - `NO_CALL` — never takes call on this rotation.
+- One row per `(rotation, PGY)` pair. Missing rows default to `NO_CALL`.
+
+Example:
+
+| rotation_name | pgy | preference |
+|---|---|---|
+| WARDS | 1 | ELIGIBLE |
+| WARDS | 2 | ELIGIBLE |
+| WARDS | 3 | ELIGIBLE |
+| NF | 1 | NO_CALL |
+| ELECTIVE | 2 | AVOID |
+
+#### 3. `no_call_days.xlsx` — vacations, conferences, days off
+
+Per-resident date ranges where the resident is unavailable for call.
+
+- **Columns (row 1 = header):** `name`, `start_date`, `end_date`, `type` *(optional)*
+- One row per range. `type` is a free-form label that appears in the audit report (e.g. `vacation`, `conference`, `wedding`). May be omitted.
+- For a single day, set `start_date` and `end_date` to the same date.
+
+Example:
+
+| name | start_date | end_date | type |
+|---|---|---|---|
+| McMurray | 2026-12-22 | 2026-12-29 | vacation |
+| Lovell | 2027-03-15 | 2027-03-15 | conference |
+
+#### 4. `holidays.xlsx` — holiday dates + optional manual assignments
+
+Holidays are visually highlighted in the output. The `upper` and `intern` columns let you hand-assign specific residents for holidays (otherwise the scheduler picks).
+
+- **Columns (row 1 = header):** `date`, `name`, `upper`, `intern`
+- `name` is a free-form label (`Christmas`, `Thanksgiving`); defaults to `Holiday` if blank.
+- `upper` / `intern`: blank cells are left **unassigned** and flagged in the audit so you can hand-fill before shipping. Pre-filled cells are locked in.
+- Upper assignments must be PGY2 or PGY3; intern assignments must be PGY1. The app errors at load time if a PGY mismatch is detected.
+
+Example:
+
+| date | name | upper | intern |
+|---|---|---|---|
+| 2026-12-25 | Christmas | Lovell | McMurray |
+| 2027-01-01 | New Year | | |
+
+---
+
+### Optional input files
+
+#### 5. `clinic_days.xlsx` — per-block continuity clinic schedule
+
+The day **before** each clinic is automatically blocked as a no-call day for the resident in clinic (so they're not post-call the morning of clinic). This is a "working document" format — designed to evolve through the year.
+
+- **Workbook structure:** exactly 13 sheets named `Block 1`, `Block 2`, …, `Block 13`. Sheet name matching is case-insensitive.
+- **Per-sheet structure:**
+  - The "Date" column is found by scanning the **first 10 rows** for a cell whose value (case-insensitive, trimmed) is exactly `Date`. The match is confirmed by checking that the cell directly below it contains a parseable date.
+  - **Multiple header rows are fine** — anything above the confirmed "Date" header is ignored (so columns labelled "Amb - Davis", "Interns", day-of-week, etc. are no problem).
+  - **Cells to the left of the Date column are ignored** (commonly used for day-of-week labels like `MON`/`TUES`).
+  - **Cells to the right of the Date column** list the resident names who have clinic that day. Empty cells are skipped. The app scans up to N cells right, where N = total resident count.
+  - **Body cells that match header-like labels** (`Date`, `Intern`, `Interns`, `Amb - <anything>`) are silently ignored — handy for stray cells in a working doc.
+  - **Trailing `?` on a name** (e.g. `Payne?`) means "supervisor is unsure." The app strips the `?` for matching, applies the call block normally, and emits a one-time warning so you can verify later. The `?` is **not** removed from the source file.
+  - **Empty block sheets are OK** — a `Block N` sheet with no clinics yet is accepted silently.
+
+**Hard-error validation** (these all stop the run with a clear sheet/row pointer):
+- A `Date` header is found, but the cell below it contains a non-date value (likely a misplaced column).
+- A clinic date falls outside the academic year.
+- A clinic date is on the wrong `Block N` sheet (i.e. the date is outside that block's calendar range).
+- A resident name does not match any name in `flow.xlsx`.
+
+Example `Block 1` layout:
+
+| A | B | C | D | E | ... |
+|---|---|---|---|---|---|
+| *(free-form header row)* | | | Amb - Davis | | |
+| | **Date** | | | | Interns |
+| MON | 2026-07-06 | Clark | McMurray | Snell | |
+| TUES | 2026-07-07 | Behaj | Green | | |
+
+The columns labeled "Amb - Davis" and "Interns" in the header row above the Date header are noise — they're ignored. Only resident names in body rows count.
+
+#### 6. `completed_calls.xlsx` — mid-year handoff seed
+
+Used only when **"Partial year"** is enabled in the GUI. Tells the scheduler which calls are already done so it picks up after the last entry.
+
+- **Columns (row 1 = header):** `date`, `upper`, `intern`
+- One row per day. Blank `upper` or `intern` cells are tolerated (the scheduler infers from context).
+- The scheduler restarts on the day after the latest date in this file.
 
 ---
 
@@ -53,7 +163,7 @@ After a successful run, three files land in `data/output/` and are also offered 
 | File | Audience | What's in it |
 |---|---|---|
 | **`call_schedule.xlsx`** | The residents — this is the published schedule | Day-by-day calendar with assigned upper-level and intern. Holidays highlighted. |
-| **`call_totals.xlsx`** | Chief / scheduler — fairness sanity check | Per-resident counts: total weekday calls, weekend calls, holidays. Color-coded gaps. |
+| **`call_totals.xlsx`** | Chief / scheduler — fairness sanity check | Per-resident counts: `total_calls`, `weekday_calls`, `weekend_calls`, `friday_calls`, `saturday_calls`, `Jul_Dec_calls`, `Jan_Jun_calls`. Friday and Saturday are tracked separately because they're the least-favoured days. Color-coded by PGY. |
 | **`audit_report.txt`** | Anyone debugging an issue | Plain-text summary: errors, warnings, fairness gaps, list of unassigned slots, and reasoning. **Read this first if anything looks off.** |
 
 ---
@@ -92,7 +202,7 @@ If you do change weights and find a setting you like, click **"Save as defaults"
 
 ### How do I generate a partial-year schedule (mid-year handoff)?
 
-1. Fill in `data/completed_calls.xlsx` with all calls already assigned (one row per day, columns: `date`, upper name, intern name).
+1. Fill in `data/completed_calls.xlsx` with all calls already assigned (columns `date`, `upper`, `intern` — see the [Input files](#optional-input-files) section above for full format details).
 2. In the GUI, toggle **"Use completed calls"** on.
 3. Run. The scheduler picks up from the day after the last completed call.
 
