@@ -235,7 +235,46 @@ def _validate_holidays(path: Path) -> Optional[str]:
 
 
 def _validate_clinic(path: Path) -> Optional[str]:
-    return _validate_required_headers(path, {"name", "date"}, "Clinic days")
+    """Upload-time shape check for the clinic-days workbook.
+
+    Verifies the workbook has 13 sheets named 'Block 1'..'Block 13' and
+    that each sheet has a 'Date' column (case-insensitive) within the first
+    10 rows whose cell below parses as a date. Per-row content validation
+    (names match residents, dates fall inside each block, etc.) is deferred
+    to load_data_bundle because it requires the flow sheet.
+    """
+    try:
+        from openpyxl import load_workbook as _lw
+        wb = _lw(path, data_only=True)
+    except Exception as e:
+        return f"Clinic days error: could not open workbook ({e})."
+
+    sheetnames_lower = {s.lower(): s for s in wb.sheetnames}
+    missing = [
+        f"Block {i}" for i in range(1, 14)
+        if f"block {i}" not in sheetnames_lower
+    ]
+    if missing:
+        return (
+            "Clinic days error: workbook is missing required sheet(s): "
+            f"{', '.join(missing)}. Expected sheets 'Block 1' through 'Block 13'."
+        )
+
+    from loader import _find_clinic_date_column
+    from errors import DataValidationError as _DVE
+
+    # _find_clinic_date_column returns None for empty block sheets and only
+    # raises when a 'Date' header points at non-date data — which is what we
+    # want to surface at upload time.
+    for i in range(1, 14):
+        actual = sheetnames_lower[f"block {i}"]
+        ws = wb[actual]
+        try:
+            _find_clinic_date_column(ws, actual)
+        except _DVE as e:
+            return f"Clinic days error: {e}"
+
+    return None
 
 
 def _validate_completed(path: Path) -> Optional[str]:
@@ -292,7 +331,7 @@ UPLOAD_SLOTS: list[UploadSlot] = [
         saved_filename="clinic_days.xlsx",
         required=False,
         validator=_validate_clinic,
-        help="Optional. Columns: name, date.",
+        help="Optional. Workbook with sheets 'Block 1' through 'Block 13'. Each sheet has a 'Date' column (within the first 10 rows) and resident names listed to the right of each date.",
     ),
     UploadSlot(
         key="completed_calls",
@@ -1315,11 +1354,16 @@ def _preflight_completed_assignments(config: dict, paths: dict) -> list:
         academic_start = date.fromisoformat(
             str(config["ACADEMIC_DATE_START_STRING"])
         )
+        academic_end = date.fromisoformat(
+            str(config["ACADEMIC_DATE_END_STRING"])
+        )
         bundle = load_data_bundle(
             paths,
             academic_year_start=academic_start.year,
             intern_block1_weekday_calls=True,
             use_completed_calls=False,
+            academic_start_date=academic_start,
+            academic_end_date=academic_end,
         )
         block1_end = bundle.block1_end
     return load_completed_calls(paths["completed_calls_xlsx"], block1_end=block1_end)
@@ -1780,6 +1824,8 @@ def _totals_dataframe(residents: dict) -> pd.DataFrame:
             "total_calls": r.get("total_calls", 0),
             "weekday_calls": r.get("weekday_calls", 0),
             "weekend_calls": r.get("weekend_calls", 0),
+            "friday_calls": r.get("friday_calls", 0),
+            "saturday_calls": r.get("saturday_calls", 0),
             "Jul_Dec_calls": r.get("Jul_Dec_calls", 0),
             "Jan_Jun_calls": r.get("Jan_Jun_calls", 0),
         })

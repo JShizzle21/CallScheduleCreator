@@ -35,6 +35,8 @@ def make_resident(pgy: int) -> dict:
         "total_calls": 0,
         "weekday_calls": 0,
         "weekend_calls": 0,
+        "friday_calls": 0,
+        "saturday_calls": 0,
         "upper_calls": 0,
         "intern_calls": 0,
         "Jul_Dec_calls": 0,

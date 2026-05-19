@@ -1,8 +1,10 @@
+import warnings
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Iterable
 from openpyxl import load_workbook
 
 from config import CONFIG
+from errors import DataValidationError
 
 ROTATION_RULES_XLSX = CONFIG.get("ROTATION_RULES_XLSX", "data/rotation_rules.xlsx")
 NO_CALL_DAYS_XLSX = CONFIG.get("NO_CALL_DAYS_XLSX", "data/no_call_days.xlsx")
@@ -49,6 +51,8 @@ def load_residents(lookup) -> Dict[str, dict]:
             "total_calls": 0,
             "weekday_calls": 0,
             "weekend_calls": 0,
+            "friday_calls": 0,
+            "saturday_calls": 0,
             "upper_calls": 0,
             "intern_calls": 0,
             "Jul_Dec_calls": 0,
@@ -62,6 +66,24 @@ def _normalize_header(value) -> str:
     return str(value).strip().lower() if value is not None else ""
 
 
+_DATE_FORMATS = (
+    "%Y-%m-%d",        # 2026-07-01
+    "%Y/%m/%d",        # 2026/07/01
+    "%m/%d/%Y",        # 7/1/2026
+    "%m/%d/%y",        # 7/1/26
+    "%m-%d-%Y",        # 7-1-2026
+    "%m-%d-%y",        # 7-1-26
+    "%B %d %Y",        # July 1 2026
+    "%B %d, %Y",       # July 1, 2026
+    "%d %B %Y",        # 1 July 2026
+    "%d-%B-%Y",        # 1-July-2026
+    "%b %d %Y",        # Jul 1 2026
+    "%b %d, %Y",       # Jul 1, 2026
+    "%d %b %Y",        # 1 Jul 2026
+    "%d-%b-%Y",        # 1-Jul-2026
+)
+
+
 def _parse_date(value) -> date:
     if value is None or value == "":
         raise ValueError("Blank date cell encountered while loading Excel input file.")
@@ -72,9 +94,11 @@ def _parse_date(value) -> date:
         return value
 
     s = str(value).strip()
-    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y"):
+    # Collapse internal whitespace so "July  1,  2026" still parses.
+    s_clean = " ".join(s.split())
+    for fmt in _DATE_FORMATS:
         try:
-            return datetime.strptime(s, fmt).date()
+            return datetime.strptime(s_clean, fmt).date()
         except ValueError:
             pass
 
@@ -153,26 +177,278 @@ def load_holidays(path: str = HOLIDAYS_XLSX) -> Dict[date, dict]:
     return out
 
 
-def load_clinic_days(path: str = CLINIC_DAYS_XLSX) -> Dict[str, Dict[date, str]]:
-    """Load clinic days and return the day BEFORE each clinic as a no-call day.
+CLINIC_HEADER_SCAN_ROWS = 10
+EXPECTED_CLINIC_BLOCK_COUNT = 13
+
+# Body-row cell values that match these patterns are silently ignored — they
+# are header-like labels (or stray copy-paste artefacts) from the
+# supervisor's working doc, not resident names.
+_CLINIC_IGNORED_BODY_LABELS = {"date", "intern", "interns"}
+
+
+# Module-level set of clinic-warning keys already emitted in this process.
+# Prevents the same '?' warning from firing once per Monte Carlo seed when
+# run_simulation rebuilds the data bundle per run.
+# (Each ProcessPoolExecutor worker has its own copy, so the warning will
+# still fire once per worker process — acceptably small.)
+_clinic_warning_seen: set = set()
+
+# Also register Python's own per-process "once" filter as a belt-and-braces
+# guard in case our explicit set is somehow bypassed.
+warnings.filterwarnings(
+    "once",
+    message=r".*uncertain entry.*Confirm with supervisor\.",
+    category=UserWarning,
+)
+
+
+def _is_ignored_clinic_label(value: str) -> bool:
+    """True if a body-row cell value is a known non-name label to skip."""
+    lower = value.lower()
+    if lower in _CLINIC_IGNORED_BODY_LABELS:
+        return True
+    # 'Amb - <whatever>' is a rotation/group marker the supervisor places in
+    # the sheet — never a resident name on its own.
+    if lower.startswith("amb -") or lower.startswith("amb-"):
+        return True
+    return False
+
+
+def _is_parseable_date(value) -> bool:
+    """Lightweight helper: True iff value parses as a date via _parse_date."""
+    if value is None or value == "":
+        return False
+    try:
+        _parse_date(value)
+        return True
+    except ValueError:
+        return False
+
+
+def _find_clinic_date_column(ws, sheet_name: str) -> Optional[Tuple[int, int]]:
+    """Locate the 'date' header in a clinic-days block sheet.
+
+    Scans the first CLINIC_HEADER_SCAN_ROWS rows for any cell whose
+    case-insensitive trimmed value equals 'date'. Each candidate is
+    classified by the cell directly below:
+      - Parses as a date            → CONFIRMED (the right column to use).
+      - Blank/empty                 → AMBIGUOUS (could be an empty sheet).
+      - Non-empty, not a date       → BAD (suspicious — header is misplaced
+                                       or the column is mislabelled).
+
+    Returns:
+      - (header_row, date_col) for the first confirmed candidate.
+      - None if no 'date' header exists at all OR all 'date' headers are
+        AMBIGUOUS (treated as "this block has no clinics yet").
+
+    Raises DataValidationError only when a 'date' header has non-date data
+    below it AND no other column confirms — that pattern usually means the
+    user has the date column in the wrong place.
+    """
+    confirmed: Optional[Tuple[int, int]] = None
+    bad: List[Tuple[int, int, object]] = []
+    ambiguous_count = 0
+
+    max_scan_row = min(CLINIC_HEADER_SCAN_ROWS, ws.max_row)
+    for r in range(1, max_scan_row + 1):
+        for c in range(1, ws.max_column + 1):
+            v = ws.cell(row=r, column=c).value
+            if v is None:
+                continue
+            if str(v).strip().lower() != "date":
+                continue
+            below = ws.cell(row=r + 1, column=c).value
+            if below is None or str(below).strip() == "":
+                ambiguous_count += 1
+                continue
+            if _is_parseable_date(below):
+                if confirmed is None:
+                    confirmed = (r, c)
+            else:
+                bad.append((r, c, below))
+
+    if confirmed is not None:
+        return confirmed
+
+    if bad:
+        details = ", ".join(
+            f"row {r} col {c} (below = {value!r})" for r, c, value in bad
+        )
+        raise DataValidationError(
+            f"clinic_days.xlsx sheet '{sheet_name}': found 'Date' header(s) "
+            f"at {details}, but the cell below is not a recognizable date. "
+            f"Either fix the value or move the 'Date' header to the correct "
+            f"column."
+        )
+
+    # No confirmed and no bad. Either there were only ambiguous 'date'
+    # headers (empty block), or no 'date' header at all (also treated as
+    # empty — the loader will still error if the sheet has stray names
+    # elsewhere).
+    return None
+
+
+def load_clinic_days(
+    path: str = CLINIC_DAYS_XLSX,
+    *,
+    valid_residents: Optional[Iterable[str]] = None,
+    academic_start: Optional[date] = None,
+    academic_end: Optional[date] = None,
+    blocks: Optional[List] = None,
+) -> Dict[str, Dict[date, str]]:
+    """Load clinic days from a 13-sheet workbook → day-before no-call map.
 
     Residency rule: a resident cannot take call the night before a clinic
-    because the following morning they must be present in clinic (post-call
-    rest day would conflict). The day before each clinic date is therefore
-    blocked with reason 'pre_clinic_day'.
+    because the following morning they must be present in clinic. The day
+    before each clinic date is blocked with reason 'pre_clinic_day'.
 
-    File format: columns 'name' and 'date' (one row per clinic day).
+    Workbook format:
+      - Sheets named 'Block 1' through 'Block 13' (one per academic block).
+      - Each sheet has a 'Date' column (case-insensitive header) somewhere in
+        the first 10 rows; the column may be preceded by other columns (e.g.
+        day-of-week) that are ignored.
+      - The cell directly below the 'Date' header confirms the column —
+        it must parse as a date.
+      - Rows below the header: column = a clinic date; cells to the right
+        list the resident names with clinic that day. Empty cells are
+        skipped. Cells to the left of the Date column are ignored.
+      - If a row's date cell is blank or unparseable, the row is skipped
+        silently (allows in-progress edits).
+
+    Validation (only when the corresponding params are supplied):
+      - `valid_residents`: any name not in this set → DataValidationError.
+        Also caps the rightward scan at `len(valid_residents)` cells past
+        the Date column.
+      - `academic_start`/`academic_end`: clinic dates outside this inclusive
+        range → DataValidationError.
+      - `blocks`: list of Block objects (with .start/.end). A date on sheet
+        'Block N' that falls outside blocks[N-1]'s range → DataValidationError.
+
     If the file does not exist, returns an empty dict (clinics are optional).
     """
     out: Dict[str, Dict[date, str]] = {}
     try:
-        for row in _iter_excel_dict_rows(path):
-            name = str(row["name"]).strip()
-            clinic_date = _parse_date(row["date"])
-            blocked_date = clinic_date - timedelta(days=1)
-            out.setdefault(name, {})[blocked_date] = "pre_clinic_day"
+        wb = load_workbook(path, data_only=True)
     except FileNotFoundError:
-        pass
+        return out
+
+    name_set = set(valid_residents) if valid_residents is not None else None
+    resident_count = len(name_set) if name_set is not None else None
+
+    sheetnames_lower = {s.lower(): s for s in wb.sheetnames}
+
+    for block_idx in range(1, EXPECTED_CLINIC_BLOCK_COUNT + 1):
+        expected = f"Block {block_idx}"
+        actual_name = sheetnames_lower.get(expected.lower())
+        if actual_name is None:
+            raise DataValidationError(
+                f"clinic_days.xlsx is missing sheet '{expected}'. "
+                f"The workbook must contain 13 sheets named 'Block 1' "
+                f"through 'Block 13'."
+            )
+
+        ws = wb[actual_name]
+        located = _find_clinic_date_column(ws, actual_name)
+        if located is None:
+            # No confirmed date column. Treat as empty block UNLESS the sheet
+            # has stray non-header content past the scan rows, which would
+            # suggest data is present but the Date column is missing.
+            scan_floor = CLINIC_HEADER_SCAN_ROWS + 1
+            has_stray = False
+            for r in range(scan_floor, ws.max_row + 1):
+                for c in range(1, ws.max_column + 1):
+                    v = ws.cell(row=r, column=c).value
+                    if v is not None and str(v).strip() != "":
+                        has_stray = True
+                        break
+                if has_stray:
+                    break
+            if has_stray:
+                raise DataValidationError(
+                    f"clinic_days.xlsx sheet '{actual_name}': contains data "
+                    f"below row {CLINIC_HEADER_SCAN_ROWS} but no 'Date' "
+                    f"header with a recognizable date value could be found "
+                    f"in the first {CLINIC_HEADER_SCAN_ROWS} rows. Add a "
+                    f"'Date' column header with a valid date below it."
+                )
+            continue
+        header_row, date_col = located
+
+        # Restrict rightward scan: never more cells than total residents.
+        if resident_count is not None:
+            scan_end = min(ws.max_column, date_col + resident_count)
+        else:
+            scan_end = ws.max_column
+
+        block = blocks[block_idx - 1] if blocks is not None and len(blocks) >= block_idx else None
+
+        for r in range(header_row + 1, ws.max_row + 1):
+            date_cell = ws.cell(row=r, column=date_col).value
+            if date_cell is None or str(date_cell).strip() == "":
+                continue
+            try:
+                clinic_date = _parse_date(date_cell)
+            except ValueError:
+                # Non-date value in a body row — treat as in-progress / ignore.
+                continue
+
+            if academic_start is not None and academic_end is not None:
+                if clinic_date < academic_start or clinic_date > academic_end:
+                    raise DataValidationError(
+                        f"clinic_days.xlsx sheet '{actual_name}' row {r}: "
+                        f"clinic date {clinic_date} is outside the academic "
+                        f"year ({academic_start} to {academic_end})."
+                    )
+
+            if block is not None:
+                if clinic_date < block.start or clinic_date > block.end:
+                    raise DataValidationError(
+                        f"clinic_days.xlsx sheet '{actual_name}' row {r}: "
+                        f"clinic date {clinic_date} is outside this block's "
+                        f"calendar range ({block.start} to {block.end}). "
+                        f"Move this row to the correct block sheet."
+                    )
+
+            blocked_date = clinic_date - timedelta(days=1)
+            for c in range(date_col + 1, scan_end + 1):
+                v = ws.cell(row=r, column=c).value
+                if v is None or str(v).strip() == "":
+                    continue
+                raw = str(v).strip()
+
+                # Skip header-like labels that bleed into body cells
+                # (working-doc artefacts: stray 'Date', 'Intern',
+                # 'Amb - <something>', etc.).
+                if _is_ignored_clinic_label(raw):
+                    continue
+
+                # Trailing '?' marks an uncertain entry from the supervisor's
+                # working doc. Strip the '?' for matching purposes (the
+                # source file is left untouched), still apply the call, and
+                # emit a one-time warning so the user can confirm later.
+                # The '?' stays in the supervisor's spreadsheet; only our
+                # in-memory copy is stripped.
+                name = raw
+                if name.endswith("?"):
+                    name = name.rstrip("?").strip()
+                    key = (actual_name, r, raw)
+                    if key not in _clinic_warning_seen:
+                        _clinic_warning_seen.add(key)
+                        warnings.warn(
+                            f"clinic_days.xlsx sheet '{actual_name}' row {r}: "
+                            f"uncertain entry '{raw}' - treating as '{name}'. "
+                            f"Confirm with supervisor.",
+                            stacklevel=2,
+                        )
+
+                if name_set is not None and name not in name_set:
+                    raise DataValidationError(
+                        f"clinic_days.xlsx sheet '{actual_name}' row {r}: "
+                        f"resident name '{name}' does not match any resident "
+                        f"in the flow sheet. Names must match exactly."
+                    )
+                out.setdefault(name, {})[blocked_date] = "pre_clinic_day"
+
     return out
 
 

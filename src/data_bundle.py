@@ -55,6 +55,8 @@ def load_data_bundle(
     academic_year_start: int,
     intern_block1_weekday_calls: bool,
     use_completed_calls: bool,
+    academic_start_date: Optional[date] = None,
+    academic_end_date: Optional[date] = None,
 ) -> DataBundle:
     """Load every input file referenced by `paths` into a DataBundle.
 
@@ -81,7 +83,13 @@ def load_data_bundle(
     residents = load_residents(lookup)
     rules = load_rotation_rules(paths["rotation_rules_xlsx"])
     no_call_base = load_no_call_days(paths["no_call_days_xlsx"])
-    clinic_pre_blocks = load_clinic_days(paths["clinic_days_xlsx"])
+    clinic_pre_blocks = load_clinic_days(
+        paths["clinic_days_xlsx"],
+        valid_residents=residents.keys(),
+        academic_start=academic_start_date,
+        academic_end=academic_end_date,
+        blocks=lookup.blocks,
+    )
     no_call = _merge_no_call(no_call_base, clinic_pre_blocks)
     holidays = load_holidays(paths["holidays_xlsx"])
 

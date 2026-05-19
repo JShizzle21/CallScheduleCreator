@@ -743,6 +743,14 @@ def apply_assignment(residents: Dict[str, dict], name: str, slot: str, d: date) 
     else:
         data["weekday_calls"] += 1
 
+    # Friday and Saturday counted separately (in addition to weekday/weekend)
+    # because they are the least-favoured days and tracked explicitly in the
+    # call_totals output.
+    if d.weekday() == 4:
+        data["friday_calls"] += 1
+    elif d.weekday() == 5:
+        data["saturday_calls"] += 1
+
     if slot in (SLOT_INTERN_WEEKEND, SLOT_INTERN_WEEKDAY):
         data["intern_calls"] += 1
     else:
@@ -765,6 +773,12 @@ def _undo_assignment(residents: Dict[str, dict], name: str, slot: str, d: date) 
         data["weekend_calls"] -= 1
     else:
         data["weekday_calls"] -= 1
+
+    # Mirror the friday/saturday increments in apply_assignment.
+    if d.weekday() == 4:
+        data["friday_calls"] -= 1
+    elif d.weekday() == 5:
+        data["saturday_calls"] -= 1
 
     if slot in (SLOT_INTERN_WEEKEND, SLOT_INTERN_WEEKDAY):
         data["intern_calls"] -= 1
@@ -1054,6 +1068,8 @@ def generate_schedule_once(
             academic_year_start=ACADEMIC_YEAR_START,
             intern_block1_weekday_calls=bool(INTERN_BLOCK1_WEEKDAY_CALLS),
             use_completed_calls=False,  # completed_assignments param wins
+            academic_start_date=ACADEMIC_DATE_START,
+            academic_end_date=ACADEMIC_DATE_END,
         )
 
     rng = random.Random(seed)
@@ -1414,6 +1430,8 @@ def _main() -> int:
                 academic_year_start=ACADEMIC_YEAR_START,
                 intern_block1_weekday_calls=True,
                 use_completed_calls=False,
+                academic_start_date=ACADEMIC_DATE_START,
+                academic_end_date=ACADEMIC_DATE_END,
             )
             _block1_end = bundle.block1_end
         else:

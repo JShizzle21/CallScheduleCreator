@@ -42,6 +42,8 @@ def write_call_totals_xlsx(residents: dict, path: str) -> None:
         "total_calls",
         "weekday_calls",
         "weekend_calls",
+        "friday_calls",
+        "saturday_calls",
         "Jul_Dec_calls",
         "Jan_Jun_calls",
     ]
@@ -59,8 +61,9 @@ def write_call_totals_xlsx(residents: dict, path: str) -> None:
     pgy3_fill = PatternFill("solid", fgColor="F4CCCC")
 
     # Vertical separators on the right edge of pgy (B), total_calls (C),
-    # and weekend_calls (E) — groups: identity | total | weekday/weekend | halves.
-    divider_cols = (2, 3, 5)
+    # weekend_calls (E), and saturday_calls (G) — groups:
+    # identity | total | weekday/weekend | friday/saturday | halves.
+    divider_cols = (2, 3, 5, 7)
     right_border = Border(right=Side(style="thin"))
 
     for name, r in residents.items():
@@ -70,6 +73,8 @@ def write_call_totals_xlsx(residents: dict, path: str) -> None:
             r["total_calls"],
             r["weekday_calls"],
             r["weekend_calls"],
+            r.get("friday_calls", 0),
+            r.get("saturday_calls", 0),
             r["Jul_Dec_calls"],
             r["Jan_Jun_calls"],
         ])
@@ -82,7 +87,7 @@ def write_call_totals_xlsx(residents: dict, path: str) -> None:
         else:
             fill = pgy3_fill
 
-        for col in range(1, 8):
+        for col in range(1, 10):
             ws.cell(row=row_i, column=col).fill = fill
 
         for col in divider_cols:
@@ -97,8 +102,10 @@ def write_call_totals_xlsx(residents: dict, path: str) -> None:
     ws.column_dimensions["C"].width = 12
     ws.column_dimensions["D"].width = 15
     ws.column_dimensions["E"].width = 15
-    ws.column_dimensions["F"].width = 18
-    ws.column_dimensions["G"].width = 20
+    ws.column_dimensions["F"].width = 14
+    ws.column_dimensions["G"].width = 15
+    ws.column_dimensions["H"].width = 18
+    ws.column_dimensions["I"].width = 20
 
     wb.save(path)
 
