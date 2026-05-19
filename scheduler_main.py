@@ -743,13 +743,15 @@ def apply_assignment(residents: Dict[str, dict], name: str, slot: str, d: date) 
     else:
         data["weekday_calls"] += 1
 
-    # Friday and Saturday counted separately (in addition to weekday/weekend)
-    # because they are the least-favoured days and tracked explicitly in the
-    # call_totals output.
+    # Friday, Saturday, and Sunday counted separately (in addition to
+    # weekday/weekend) because they are the least-favoured days and tracked
+    # explicitly in the call_totals output.
     if d.weekday() == 4:
         data["friday_calls"] += 1
     elif d.weekday() == 5:
         data["saturday_calls"] += 1
+    elif d.weekday() == 6:
+        data["sunday_calls"] += 1
 
     if slot in (SLOT_INTERN_WEEKEND, SLOT_INTERN_WEEKDAY):
         data["intern_calls"] += 1
@@ -774,11 +776,13 @@ def _undo_assignment(residents: Dict[str, dict], name: str, slot: str, d: date) 
     else:
         data["weekday_calls"] -= 1
 
-    # Mirror the friday/saturday increments in apply_assignment.
+    # Mirror the friday/saturday/sunday increments in apply_assignment.
     if d.weekday() == 4:
         data["friday_calls"] -= 1
     elif d.weekday() == 5:
         data["saturday_calls"] -= 1
+    elif d.weekday() == 6:
+        data["sunday_calls"] -= 1
 
     if slot in (SLOT_INTERN_WEEKEND, SLOT_INTERN_WEEKDAY):
         data["intern_calls"] -= 1

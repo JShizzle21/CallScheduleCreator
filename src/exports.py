@@ -44,6 +44,7 @@ def write_call_totals_xlsx(residents: dict, path: str) -> None:
         "weekend_calls",
         "friday_calls",
         "saturday_calls",
+        "sunday_calls",
         "Jul_Dec_calls",
         "Jan_Jun_calls",
     ]
@@ -60,11 +61,13 @@ def write_call_totals_xlsx(residents: dict, path: str) -> None:
     pgy2_fill = PatternFill("solid", fgColor="CFE2F3")
     pgy3_fill = PatternFill("solid", fgColor="F4CCCC")
 
-    # Vertical separators on the right edge of pgy (B), total_calls (C),
-    # weekend_calls (E), and saturday_calls (G) — groups:
-    # identity | total | weekday/weekend | friday/saturday | halves.
-    divider_cols = (2, 3, 5, 7)
-    right_border = Border(right=Side(style="thin"))
+    # Bold vertical separators on the right edge of pgy (B), weekend_calls (E),
+    # and sunday_calls (H) — groups:
+    # name/pgy | totals/weekday/weekend | fri/sat/sun | halves.
+    divider_cols = (2, 5, 8)
+    bold_right_border = Border(right=Side(style="thick"))
+
+    n_cols = len(headers)
 
     for name, r in residents.items():
         ws.append([
@@ -75,6 +78,7 @@ def write_call_totals_xlsx(residents: dict, path: str) -> None:
             r["weekend_calls"],
             r.get("friday_calls", 0),
             r.get("saturday_calls", 0),
+            r.get("sunday_calls", 0),
             r["Jul_Dec_calls"],
             r["Jan_Jun_calls"],
         ])
@@ -87,15 +91,15 @@ def write_call_totals_xlsx(residents: dict, path: str) -> None:
         else:
             fill = pgy3_fill
 
-        for col in range(1, 10):
+        for col in range(1, n_cols + 1):
             ws.cell(row=row_i, column=col).fill = fill
 
         for col in divider_cols:
-            ws.cell(row=row_i, column=col).border = right_border
+            ws.cell(row=row_i, column=col).border = bold_right_border
 
     # Apply the same dividers to the header row so the lines are continuous.
     for col in divider_cols:
-        ws.cell(row=1, column=col).border = right_border
+        ws.cell(row=1, column=col).border = bold_right_border
 
     ws.column_dimensions["A"].width = 18
     ws.column_dimensions["B"].width = 8
@@ -104,8 +108,9 @@ def write_call_totals_xlsx(residents: dict, path: str) -> None:
     ws.column_dimensions["E"].width = 15
     ws.column_dimensions["F"].width = 14
     ws.column_dimensions["G"].width = 15
-    ws.column_dimensions["H"].width = 18
-    ws.column_dimensions["I"].width = 20
+    ws.column_dimensions["H"].width = 14
+    ws.column_dimensions["I"].width = 18
+    ws.column_dimensions["J"].width = 20
 
     wb.save(path)
 
@@ -153,7 +158,9 @@ def write_call_schedule_xlsx(
     holiday_fill = PatternFill("solid", fgColor="F8CBAD")
     block_fill = PatternFill("solid", fgColor="D9EAD3")
     completed_fill = PatternFill("solid", fgColor="EBEBEB")  # light grey for completed rows
-    thick_top = Border(top=Side(style="medium"))
+    # Thick horizontal line across the top of every block-start row so it's
+    # obvious where one block ends and the next begins.
+    thick_top = Border(top=Side(style="thick"))
 
     date_to_block_num = {}
     for i, block in enumerate(lookup.blocks, start=1):
@@ -217,7 +224,10 @@ def write_call_schedule_xlsx(
                 ws.cell(row=row_i, column=col).font = italic
 
         if d in block_start_dates:
-            for col in range(1, 6):
+            # Extend the divider across all 6 columns (Block, Date, Day,
+            # Upper level, Intern, No Call) so the block boundary is
+            # visually unambiguous.
+            for col in range(1, 7):
                 ws.cell(row=row_i, column=col).border = thick_top
                 if col == 1:
                     ws.cell(row=row_i, column=col).fill = block_fill

@@ -1826,6 +1826,7 @@ def _totals_dataframe(residents: dict) -> pd.DataFrame:
             "weekend_calls": r.get("weekend_calls", 0),
             "friday_calls": r.get("friday_calls", 0),
             "saturday_calls": r.get("saturday_calls", 0),
+            "sunday_calls": r.get("sunday_calls", 0),
             "Jul_Dec_calls": r.get("Jul_Dec_calls", 0),
             "Jan_Jun_calls": r.get("Jan_Jun_calls", 0),
         })

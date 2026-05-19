@@ -45,6 +45,7 @@ def make_resident(
         "weekend_calls": weekend_calls,
         "friday_calls": 0,
         "saturday_calls": 0,
+        "sunday_calls": 0,
         "upper_calls": 0,
         "intern_calls": intern_calls,
         "Jul_Dec_calls": 0,
