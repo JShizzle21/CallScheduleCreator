@@ -1597,7 +1597,10 @@ def _start_run(num_runs: int, kind: str) -> None:
     """
     config = dict(st.session_state.config)
     paths = _build_paths_from_uploads()
-    Path(f"{paths['data_dir']}/{paths['output_dir']}").mkdir(parents=True, exist_ok=True)
+    # output_dir is now an independent top-level folder ('output_files'),
+    # not nested under data_dir. Concatenating them here used to silently
+    # create an empty 'input_files/output_files/' subfolder on every run.
+    Path(paths["output_dir"]).mkdir(parents=True, exist_ok=True)
 
     try:
         completed = _preflight_completed_assignments(config, paths)
