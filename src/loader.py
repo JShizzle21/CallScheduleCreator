@@ -131,23 +131,254 @@ def load_rotation_rules(path: str = ROTATION_RULES_XLSX) -> Dict[Tuple[str, int]
     return rules
 
 
-def load_no_call_days(path: str = NO_CALL_DAYS_XLSX) -> Dict[str, dict]:
-    out: Dict[str, dict] = {}
-    try:
-        for row in _iter_excel_dict_rows(path):
-            name = str(row["name"]).strip()
-            start = _parse_date(row["start_date"])
-            end = _parse_date(row["end_date"])
-            reason = str(row.get("type", "") or "").strip()
+_NO_CALL_HEADER_SCAN_ROWS = 30
+_NO_CALL_REQUIRED_HEADERS = ("first name", "last name", "start date", "end date")
+_NO_CALL_DEFAULT_TYPE = "time off"
 
-            cur = start
-            while cur <= end:
-                out.setdefault(name, {})[cur] = reason
-                cur += timedelta(days=1)
-    except FileNotFoundError:
-        pass
 
+def _find_no_call_header_row(ws, sheet_name: str, search_after: int = 0) -> Optional[int]:
+    """Locate a no-call header row (First Name / Last Name / Start Date / End Date).
+
+    Scans up to _NO_CALL_HEADER_SCAN_ROWS rows starting after `search_after`,
+    looking for a row that contains ALL four required header tokens
+    (case-insensitive, whitespace-collapsed). Returns the row number, or
+    None if not found.
+    """
+    max_row = min(ws.max_row, search_after + _NO_CALL_HEADER_SCAN_ROWS)
+    for r in range(search_after + 1, max_row + 1):
+        cells = [
+            " ".join(str(ws.cell(r, c).value or "").lower().split())
+            for c in range(1, ws.max_column + 1)
+        ]
+        if all(token in cells for token in _NO_CALL_REQUIRED_HEADERS):
+            return r
+    return None
+
+
+def _no_call_column_map(ws, header_row: int) -> Dict[str, int]:
+    """Map of required-header → 1-based column index."""
+    out: Dict[str, int] = {}
+    for c in range(1, ws.max_column + 1):
+        token = " ".join(str(ws.cell(header_row, c).value or "").lower().split())
+        if token in _NO_CALL_REQUIRED_HEADERS:
+            out.setdefault(token, c)
     return out
+
+
+def load_no_call_days(
+    path: str = NO_CALL_DAYS_XLSX,
+    *,
+    valid_residents: Optional[Iterable[str]] = None,
+    academic_start: Optional[date] = None,
+    academic_end: Optional[date] = None,
+    blocks: Optional[List] = None,
+) -> Tuple[Dict[str, Dict[date, str]], List[dict]]:
+    """Load no-call (time-off) requests from the 13-sheet workbook.
+
+    Workbook format:
+      - Sheets named 'Block 1' through 'Block 13' (case-insensitive).
+      - Per sheet, two sections — "Interns" and "Uppers" — each with its
+        own header row containing columns First Name, Last Name, Start
+        Date, End Date. Section labels are decoration only and may sit
+        anywhere; the loader scans for the header row.
+      - Optional `type` column to the right of End Date (free-form);
+        defaults to 'time off' when absent.
+
+    Name matching:
+      Only the Last Name column is matched against `valid_residents`.
+      Match is case-insensitive and whitespace-trimmed. Unknown last
+      names raise DataValidationError with a sheet/row pointer.
+
+    Validations (when params are supplied):
+      - Both dates must fall inside the academic year → hard error.
+      - A range crossing the Block N sheet's calendar range emits a
+        warning but is accepted as written (per-day rows are still
+        blocked across the full range).
+
+    Returns ``(per_day, entries)``:
+      - ``per_day``: ``{canonical_resident: {date: type_str}}`` — the
+        existing API consumed by the scheduler/audit.
+      - ``entries``: list of dicts with keys ``resident``, ``start``,
+        ``end``, ``type``, ``sheet``, ``row`` — preserved range entries
+        for the audit report.
+
+    Empty sheets and missing block sheets are tolerated (warns).
+    """
+    per_day: Dict[str, Dict[date, str]] = {}
+    entries: List[dict] = []
+
+    try:
+        wb = load_workbook(path, data_only=True)
+    except FileNotFoundError:
+        return per_day, entries
+
+    # Case-insensitive last-name lookup → canonical (flow-sheet) spelling.
+    last_name_lookup: Optional[Dict[str, str]] = None
+    if valid_residents is not None:
+        last_name_lookup = {
+            n.strip().lower(): n for n in valid_residents
+        }
+
+    sheetnames_lower = {s.lower(): s for s in wb.sheetnames}
+
+    for block_idx in range(1, EXPECTED_CLINIC_BLOCK_COUNT + 1):
+        expected = f"Block {block_idx}"
+        actual_name = sheetnames_lower.get(expected.lower())
+        if actual_name is None:
+            raise DataValidationError(
+                f"no_call_days.xlsx is missing sheet '{expected}'. "
+                f"The workbook must contain 13 sheets named 'Block 1' "
+                f"through 'Block 13'."
+            )
+
+        ws = wb[actual_name]
+        block = blocks[block_idx - 1] if blocks is not None and len(blocks) >= block_idx else None
+
+        # Find every header row in the sheet (one per section). We don't
+        # care about the section labels themselves — just keep walking
+        # downward looking for header rows.
+        header_rows: List[int] = []
+        cursor = 0
+        while True:
+            hdr = _find_no_call_header_row(ws, actual_name, search_after=cursor)
+            if hdr is None:
+                break
+            header_rows.append(hdr)
+            cursor = hdr
+
+        if not header_rows:
+            # Empty sheet (no headers found) — treat as zero entries.
+            continue
+
+        # For each header row, scan downward until the next header row
+        # (or end of sheet). Blank rows are skipped.
+        for section_idx, hdr_row in enumerate(header_rows):
+            colmap = _no_call_column_map(ws, hdr_row)
+            if len(colmap) < len(_NO_CALL_REQUIRED_HEADERS):
+                # Should not happen because _find_no_call_header_row
+                # already required all four — defensive check.
+                continue
+
+            first_col = colmap["first name"]
+            last_col = colmap["last name"]
+            start_col = colmap["start date"]
+            end_col = colmap["end date"]
+
+            # Optional 'type' column — anywhere to the right of end date
+            type_col: Optional[int] = None
+            for c in range(1, ws.max_column + 1):
+                token = " ".join(str(ws.cell(hdr_row, c).value or "").lower().split())
+                if token == "type":
+                    type_col = c
+                    break
+
+            section_end = (
+                header_rows[section_idx + 1] - 1
+                if section_idx + 1 < len(header_rows)
+                else ws.max_row
+            )
+
+            for r in range(hdr_row + 1, section_end + 1):
+                first_val = ws.cell(r, first_col).value
+                last_val = ws.cell(r, last_col).value
+                start_val = ws.cell(r, start_col).value
+                end_val = ws.cell(r, end_col).value
+
+                # Row entirely blank? Skip silently (working-doc spacing).
+                if all(v is None or str(v).strip() == "" for v in
+                       (first_val, last_val, start_val, end_val)):
+                    continue
+
+                # Partial row? Must have a last name + both dates.
+                last_raw = str(last_val or "").strip()
+                if not last_raw:
+                    # First-name-only or stray row — skip silently.
+                    if not (start_val or end_val):
+                        continue
+                    raise DataValidationError(
+                        f"no_call_days.xlsx sheet '{actual_name}' row {r}: "
+                        f"last name is blank but date values are present."
+                    )
+
+                if start_val is None or end_val is None or \
+                        str(start_val).strip() == "" or str(end_val).strip() == "":
+                    raise DataValidationError(
+                        f"no_call_days.xlsx sheet '{actual_name}' row {r}: "
+                        f"name '{last_raw}' is missing a start or end date."
+                    )
+
+                try:
+                    start = _parse_date(start_val)
+                    end = _parse_date(end_val)
+                except ValueError as e:
+                    raise DataValidationError(
+                        f"no_call_days.xlsx sheet '{actual_name}' row {r}: "
+                        f"could not parse date — {e}"
+                    ) from e
+
+                if end < start:
+                    raise DataValidationError(
+                        f"no_call_days.xlsx sheet '{actual_name}' row {r}: "
+                        f"end date {end} is before start date {start}."
+                    )
+
+                if academic_start is not None and academic_end is not None:
+                    if start < academic_start or end > academic_end:
+                        raise DataValidationError(
+                            f"no_call_days.xlsx sheet '{actual_name}' row {r}: "
+                            f"range {start} -> {end} is outside the academic "
+                            f"year ({academic_start} to {academic_end})."
+                        )
+
+                # Last-name canonicalisation against the flow sheet.
+                if last_name_lookup is not None:
+                    canonical = last_name_lookup.get(last_raw.lower())
+                    if canonical is None:
+                        raise DataValidationError(
+                            f"no_call_days.xlsx sheet '{actual_name}' row {r}: "
+                            f"resident last name '{last_raw}' does not match "
+                            f"any resident in the flow sheet. Names must "
+                            f"match (case-insensitive)."
+                        )
+                    resident = canonical
+                else:
+                    resident = last_raw
+
+                reason_raw = ""
+                if type_col is not None:
+                    reason_raw = str(ws.cell(r, type_col).value or "").strip()
+                reason = reason_raw or _NO_CALL_DEFAULT_TYPE
+
+                # Cross-block warning (range straddles the block this
+                # sheet represents).
+                if block is not None:
+                    if start < block.start or end > block.end:
+                        warnings.warn(
+                            f"no_call_days.xlsx sheet '{actual_name}' "
+                            f"row {r}: {resident} range {start} -> {end} "
+                            f"crosses this block's calendar range "
+                            f"({block.start} to {block.end}). "
+                            f"Accepted as written.",
+                            stacklevel=2,
+                        )
+
+                # Fan out into per-day map.
+                cur = start
+                while cur <= end:
+                    per_day.setdefault(resident, {})[cur] = reason
+                    cur += timedelta(days=1)
+
+                entries.append({
+                    "resident": resident,
+                    "first_name": str(first_val or "").strip(),
+                    "start": start,
+                    "end": end,
+                    "type": reason,
+                    "sheet": actual_name,
+                    "row": r,
+                })
+
+    return per_day, entries
 
 
 def load_holidays(path: str = HOLIDAYS_XLSX) -> Dict[date, dict]:

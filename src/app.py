@@ -223,11 +223,50 @@ def _validate_rotation_rules(path: Path) -> Optional[str]:
 
 
 def _validate_no_call(path: Path) -> Optional[str]:
-    # loader.load_no_call_days reads name, start_date, end_date, type.
-    # 'type' is optional (load handles missing via row.get).
-    return _validate_required_headers(
-        path, {"name", "start_date", "end_date"}, "No-call days"
-    )
+    """Upload-time shape check for the no-call days workbook.
+
+    Verifies the workbook has 13 sheets named 'Block 1'..'Block 13' (any
+    case) and that each sheet either is empty or contains at least one
+    header row with First Name / Last Name / Start Date / End Date.
+    Per-row content validation (last names match residents, dates inside
+    the academic year) happens at run time.
+    """
+    try:
+        from openpyxl import load_workbook as _lw
+        wb = _lw(path, data_only=True)
+    except Exception as e:
+        return f"No-call days error: could not open workbook ({e})."
+
+    sheetnames_lower = {s.lower(): s for s in wb.sheetnames}
+    missing = [
+        f"Block {i}" for i in range(1, 14)
+        if f"block {i}" not in sheetnames_lower
+    ]
+    if missing:
+        return (
+            "No-call days error: workbook is missing required sheet(s): "
+            f"{', '.join(missing)}. Expected sheets 'Block 1' through "
+            f"'Block 13'."
+        )
+
+    from loader import _find_no_call_header_row, _NO_CALL_REQUIRED_HEADERS
+
+    for i in range(1, 14):
+        actual = sheetnames_lower[f"block {i}"]
+        ws = wb[actual]
+        # Empty sheets are OK — only error if the sheet has content but
+        # no findable header row at all.
+        if ws.max_row <= 1:
+            continue
+        hdr = _find_no_call_header_row(ws, actual, search_after=0)
+        if hdr is None:
+            return (
+                f"No-call days error: sheet '{actual}' has content but no "
+                f"header row with all four columns "
+                f"({', '.join(_NO_CALL_REQUIRED_HEADERS)}) was found."
+            )
+
+    return None
 
 
 def _validate_holidays(path: Path) -> Optional[str]:
@@ -315,7 +354,7 @@ UPLOAD_SLOTS: list[UploadSlot] = [
         saved_filename="no_call_days.xlsx",
         required=True,
         validator=_validate_no_call,
-        help="Columns: name, date. May be empty if no residents have no-call requests.",
+        help="Workbook with sheets 'Block 1' through 'Block 13'. Each sheet has 'Interns' and 'Uppers' sections with columns First Name, Last Name, Start Date, End Date. Last names must match the flow sheet.",
     ),
     UploadSlot(
         key="holidays",

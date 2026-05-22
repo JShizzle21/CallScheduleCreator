@@ -1085,6 +1085,7 @@ def generate_schedule_once(
     no_call = data_bundle.no_call
     holidays = data_bundle.holidays
     block1_end = data_bundle.block1_end
+    no_call_entries = data_bundle.no_call_entries or []
 
     validate_rotations_against_rules(lookup, residents, rules)
     validate_no_call_days(no_call, residents)  # validates merged dict (both sources)
@@ -1225,6 +1226,22 @@ def generate_schedule_once(
         seed=seed,
         tiebreaker_count=tiebreaker_count,
     )
+
+    # Surface the original time-off range entries in the audit so the user
+    # can sanity-check that every request from no_call_days.xlsx was loaded
+    # and respected. Each entry has resident, start, end, type, sheet, row.
+    audit_data["no_call_entries"] = [
+        {
+            "resident": e["resident"],
+            "first_name": e.get("first_name", ""),
+            "start": e["start"].isoformat(),
+            "end": e["end"].isoformat(),
+            "type": e["type"],
+            "sheet": e["sheet"],
+            "row": e["row"],
+        }
+        for e in no_call_entries
+    ]
 
     audit_data["intern_block1_weekday_calls"] = bool(INTERN_BLOCK1_WEEKDAY_CALLS)
     audit_data["block1_end"] = block1_end.isoformat() if block1_end else None

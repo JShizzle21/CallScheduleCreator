@@ -284,6 +284,21 @@ def write_audit(audit_data, path=f"{DATA_DIR}/{OUTPUT_DIR}/audit_report.txt"):
         for key, value in audit_data["fairness_summary"].items():
             f.write(f"{key}: {value}\n")
 
+        f.write("\nTIME-OFF REQUESTS (from no_call_days.xlsx)\n")
+        f.write("-" * 60 + "\n")
+        no_call_entries = audit_data.get("no_call_entries", [])
+        if no_call_entries:
+            # Sort by resident then start date for easy scanning.
+            for e in sorted(no_call_entries, key=lambda x: (x["resident"], x["start"])):
+                first_part = f" ({e['first_name']})" if e.get("first_name") else ""
+                f.write(
+                    f"{e['resident']}{first_part} | {e['start']} -> {e['end']} | "
+                    f"{e['type']} | {e['sheet']} row {e['row']}\n"
+                )
+            f.write(f"\nTotal entries loaded: {len(no_call_entries)}\n")
+        else:
+            f.write("No time-off requests loaded.\n")
+
         f.write("\nUNASSIGNED SLOTS\n")
         f.write("-" * 60 + "\n")
         if audit_data["unassigned_rows"]:
