@@ -6,19 +6,60 @@ A Windows desktop app that builds a year-long medical residency call schedule fr
 
 ## Quick start
 
-1. **Copy the entire project folder** to your computer (anywhere — Desktop, Documents, etc.). Keep all files together.
-2. **Double-click `install.bat`.** A console window opens and runs for ~5 minutes the first time. Wait for the `Setup complete.` message, then close the window.
-3. **Double-click `run.bat`** whenever you want to use the app. Your default browser opens automatically after a few seconds.
-4. **Stop the app** when done — easiest is the **Exit** button at the top right of the browser page (it shuts down the server cleanly). You can also just close the console window.
+You only need to do steps 1–3 the **first time**. After that, just double-click `run.bat` whenever you want to use the app.
 
-To uninstall, double-click **`uninstall.bat`** — it removes the embedded Python and ~400 MB of dependencies from `%LOCALAPPDATA%\CallScheduler\`. The project folder itself you delete by hand from Explorer.
+### Step 1 — Download the project from GitHub
 
-> First-launch warnings you may see — these are normal:
-> - **Windows SmartScreen** ("Windows protected your PC"): click "More info" → "Run anyway."
-> - **Windows Defender Firewall** ("allow Python to communicate"): tick **Private networks** and click Allow.
-> - **Antivirus** flag on `.bat` files: add the project folder to your AV's exclusions if needed.
+1. Open this link in any web browser: **https://github.com/JShizzle21/CallScheduleCreator**
+2. On that page, look for the green **`< > Code`** button (top right of the file list). Click it.
+3. In the dropdown that appears, click **`Download ZIP`** at the bottom.
+4. Your browser downloads a file called `CallScheduleCreator-master.zip` (usually into your **Downloads** folder).
 
-If you ever need a clean reinstall, double-click `uninstall.bat`, then `install.bat`.
+### Step 2 — Extract the ZIP somewhere convenient
+
+1. Open your **Downloads** folder (File Explorer → Downloads on the left sidebar).
+2. **Right-click** `CallScheduleCreator-master.zip` and pick **Extract All…**
+3. When the dialog appears, click **Browse…** and choose a place you'll remember — your **Desktop** or **Documents** folder both work well. Click **Extract**.
+4. You'll end up with a folder called `CallScheduleCreator-master`. Open it. Inside you should see `install.bat`, `run.bat`, `README.md`, and a few subfolders. **This is your project folder** — don't move individual files out of it.
+
+> **Tip:** if Windows blocks the ZIP, right-click the ZIP → **Properties** → tick the **Unblock** checkbox at the bottom → click **OK**, then extract.
+
+### Step 3 — Install (one time only, ~5 minutes)
+
+1. Inside your project folder, **double-click `install.bat`**.
+2. A black console window opens. It downloads Python and the libraries the app needs (~400 MB total). Don't close the window — just leave it alone.
+3. When you see **`Setup complete.`** at the bottom, you're done. Close the window.
+
+### Step 4 — Use the app
+
+1. **Double-click `run.bat`** any time you want to use the app.
+2. A console window opens and your default browser pops up after a few seconds, showing the app.
+3. When you're finished, click the red **Exit** button at the top of the page (it shuts down the app cleanly). You can also just close the console window.
+
+### Uninstall (optional)
+
+Double-click **`uninstall.bat`** — it removes the ~400 MB of Python files from your computer. The project folder itself you delete by hand from File Explorer if you don't want it any more.
+
+---
+
+### First-launch warnings (all normal — these aren't errors)
+
+Windows is cautious about programs it hasn't seen before. If you see any of these, here's how to dismiss them:
+
+| What you see | What to do |
+|---|---|
+| **"Windows protected your PC"** (blue SmartScreen popup) | Click **More info**, then **Run anyway**. |
+| **"Allow Python to communicate on these networks"** (firewall popup) | Tick **Private networks** and click **Allow access**. |
+| Your antivirus flags `install.bat` or `run.bat` | Add the project folder to your antivirus's "exclusions" list. The scripts are plain text — you can open them in Notepad to verify. |
+
+---
+
+### Something went wrong?
+
+- **`install.bat` failed with a download error** — your network is blocking `python.org` or `pypi.org` (common on hospital networks). Try a personal network or hotspot, or ask IT to whitelist those domains.
+- **`run.bat` says "Python is not installed"** — you skipped Step 3. Run `install.bat` first, then try again.
+- **Browser doesn't open automatically** — look at the console window for a URL like `http://localhost:8501`. Copy that into your browser manually.
+- **Anything else weird** — double-click `uninstall.bat`, then `install.bat` to start clean.
 
 ---
 
