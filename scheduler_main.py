@@ -968,48 +968,67 @@ def _pre_apply_holidays(
 
         info = holidays[d]
         display_name = info["name"]
-        upper_name = info.get("upper")
-        intern_name = info.get("intern")
+        # New schema uses lists ('uppers'/'interns'); legacy single-name
+        # schema ('upper'/'intern') still supported for any callers that
+        # construct holidays dicts by hand (test fixtures, etc.).
+        uppers_list = info.get("uppers")
+        interns_list = info.get("interns")
+        if uppers_list is None:
+            uppers_list = [info["upper"]] if info.get("upper") else []
+        if interns_list is None:
+            interns_list = [info["intern"]] if info.get("intern") else []
 
         is_wknd = is_weekend(d)
         upper_slot = SLOT_UPPER_WEEKEND if is_wknd else SLOT_UPPER_WEEKDAY
         intern_slot = SLOT_INTERN_WEEKEND if is_wknd else SLOT_INTERN_WEEKDAY
 
-        for slot, name in ((upper_slot, upper_name), (intern_slot, intern_name)):
-            if name:
-                if name not in residents:
-                    raise DataValidationError(
-                        f"Holiday file references unknown resident '{name}' on "
-                        f"{d} ({display_name}). Check that names match the flow "
-                        f"sheet exactly."
-                    )
-                pgy = residents[name]["pgy"]
-                if slot in (SLOT_INTERN_WEEKEND, SLOT_INTERN_WEEKDAY) and pgy != 1:
-                    raise DataValidationError(
-                        f"Holiday file assigns '{name}' (PGY{pgy}) to the intern "
-                        f"slot on {d} ({display_name}). Interns must be PGY1."
-                    )
-                if slot in (SLOT_UPPER_WEEKDAY, SLOT_UPPER_WEEKEND) and pgy == 1:
-                    raise DataValidationError(
-                        f"Holiday file assigns '{name}' (PGY1) to the upper slot "
-                        f"on {d} ({display_name}). Upper residents must be PGY2 or PGY3."
-                    )
+        slot_to_names = (
+            (upper_slot, list(uppers_list)),
+            (intern_slot, list(interns_list)),
+        )
 
-                apply_assignment(residents, name, slot, d)
-                holiday_assignments[(d, slot)] = name
-                schedule_rows.append({
-                    "date": d.isoformat(),
-                    "day_of_week": d.strftime("%a"),
-                    "slot": slot,
-                    "resident": name,
-                    "pgy": pgy,
-                    "rotation": lookup.rotation_on_date(name, d) or "",
-                    "note": f"HOLIDAY: {display_name}",
-                })
+        for slot, names in slot_to_names:
+            if names:
+                # Apply every listed resident (supports the rare "two uppers
+                # on one holiday" case the supervisor may write). The audit
+                # surfaces count mismatches via expected-slot-count checks
+                # but doesn't halt execution.
+                for name in names:
+                    if name not in residents:
+                        raise DataValidationError(
+                            f"Holiday file references unknown resident '{name}' on "
+                            f"{d} ({display_name}). Check that names match the flow "
+                            f"sheet exactly."
+                        )
+                    pgy = residents[name]["pgy"]
+                    if slot in (SLOT_INTERN_WEEKEND, SLOT_INTERN_WEEKDAY) and pgy != 1:
+                        raise DataValidationError(
+                            f"Holiday file assigns '{name}' (PGY{pgy}) to the intern "
+                            f"slot on {d} ({display_name}). Interns must be PGY1."
+                        )
+                    if slot in (SLOT_UPPER_WEEKDAY, SLOT_UPPER_WEEKEND) and pgy == 1:
+                        raise DataValidationError(
+                            f"Holiday file assigns '{name}' (PGY1) to the upper slot "
+                            f"on {d} ({display_name}). Upper residents must be PGY2 or PGY3."
+                        )
+
+                    apply_assignment(residents, name, slot, d)
+                    # If multiple names share this slot, last-writer-wins
+                    # in the (date, slot) → name map is fine — the map is
+                    # only used by the precompute step to keep pace neutral.
+                    holiday_assignments[(d, slot)] = name
+                    schedule_rows.append({
+                        "date": d.isoformat(),
+                        "day_of_week": d.strftime("%a"),
+                        "slot": slot,
+                        "resident": name,
+                        "pgy": pgy,
+                        "rotation": lookup.rotation_on_date(name, d) or "",
+                        "note": f"HOLIDAY: {display_name}",
+                    })
             else:
-                # Blank cell for this slot — leave unassigned so the audit
-                # flags it (matches today's behaviour when holidays.xlsx has
-                # no names). Non-Block-1 weekday intern slot is skipped
+                # Blank list for this slot — leave unassigned so the audit
+                # flags it. Non-Block-1 weekday intern slot is skipped
                 # silently because that slot doesn't normally exist.
                 is_optional_intern_slot = (
                     slot == SLOT_INTERN_WEEKDAY

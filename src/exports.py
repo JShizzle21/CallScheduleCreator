@@ -136,6 +136,20 @@ def write_call_schedule_xlsx(
         cell.alignment = Alignment(horizontal="center")
     ws.freeze_panes = "A2"
 
+    def _append_name(existing: str, name: str) -> str:
+        """Join multiple residents in the same slot/day with a comma.
+
+        Holidays can have more than one ER assignment of the same PGY band
+        (rare, but the supervisor may write it). When that happens we want
+        both names visible in the call-schedule cell instead of one
+        silently overwriting the other.
+        """
+        if not existing:
+            return name
+        if not name or name in existing.split(", "):
+            return existing
+        return f"{existing}, {name}"
+
     by_date = {}
     completed_dates: set = set()
     for r in schedule_rows:
@@ -145,11 +159,11 @@ def write_call_schedule_xlsx(
 
         rec = by_date.setdefault(d, {"upper": "", "intern_weekend": "", "intern_weekday": ""})
         if slot in ("UPPER_WEEKDAY", "UPPER_WEEKEND"):
-            rec["upper"] = name
+            rec["upper"] = _append_name(rec["upper"], name)
         elif slot == "INTERN_WEEKEND":
-            rec["intern_weekend"] = name
+            rec["intern_weekend"] = _append_name(rec["intern_weekend"], name)
         elif slot == "INTERN_WEEKDAY":
-            rec["intern_weekday"] = name
+            rec["intern_weekday"] = _append_name(rec["intern_weekday"], name)
 
         if r.get("note") == "COMPLETED":
             completed_dates.add(d)

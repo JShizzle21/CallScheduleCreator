@@ -1,3 +1,4 @@
+import re
 import warnings
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Iterable
@@ -381,32 +382,352 @@ def load_no_call_days(
     return per_day, entries
 
 
-def load_holidays(path: str = HOLIDAYS_XLSX) -> Dict[date, dict]:
-    """Load holiday dates plus optional manually-assigned residents.
+_HOLIDAY_HEADER_LABELS = {"holiday", "holidays"}
+_PGY_SECTION_LABELS = {"pgy-1", "pgy-2", "pgy-3", "pgy1", "pgy2", "pgy3"}
+_TOTAL_COLUMN_KEYWORDS = ("total",)
+_ER_PREFIX_PATTERN = re.compile(r"^er(\s|$)", re.IGNORECASE)
 
-    Columns:
-      - ``date`` (required): the holiday date.
-      - ``name`` (optional): display name (e.g. "Christmas"); defaults to "Holiday".
-      - ``upper`` (optional): name of the upper-level resident who works this
-        holiday. Blank = unassigned (audit will flag).
-      - ``intern`` (optional): name of the intern who works this holiday. On
-        weekday holidays outside Block 1 the intern override replaces Night
-        Float for that day. Blank = unassigned.
 
-    Returns ``Dict[date, {"name": str, "upper": str|None, "intern": str|None}]``.
-    Membership checks (``if d in holidays``) keep working as before.
+def _is_er_rotation(value: str) -> bool:
+    """True if a rotation cell counts as an ER call assignment.
+
+    Matches case-insensitively any cell that starts with the token 'ER'
+    followed by either end-of-string or whitespace. So 'ER', 'er',
+    'ER 24', 'er pm' all match. 'ERIC' or 'ERAS' do NOT match.
     """
-    out: Dict[date, dict] = {}
+    return bool(_ER_PREFIX_PATTERN.match(value.strip()))
+
+
+def _parse_holiday_date_with_year_inference(
+    value, academic_start: Optional[date], academic_end: Optional[date]
+) -> Optional[date]:
+    """Parse a holiday date cell, tolerating decorative wrappers.
+
+    The supervisor sometimes wraps draft dates in asterisks or other
+    punctuation to flag them as "tentative" (e.g. ``****June 4****``).
+    This helper:
+      1. Tries the normal _parse_date first.
+      2. Strips common punctuation wrappers and retries.
+      3. If the resulting string has no year (e.g. ``June 4``), inserts
+         each candidate year from the academic window in turn and
+         accepts whichever lands inside the window.
+
+    Returns the parsed date, or None if all attempts failed.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+
+    # First pass: try the value as-is.
     try:
-        for row in _iter_excel_dict_rows(path):
-            d = _parse_date(row["date"])
-            name = str(row.get("name", "") or "").strip() or "Holiday"
-            upper = str(row.get("upper", "") or "").strip() or None
-            intern = str(row.get("intern", "") or "").strip() or None
-            out[d] = {"name": name, "upper": upper, "intern": intern}
-    except FileNotFoundError:
+        return _parse_date(value)
+    except ValueError:
         pass
-    return out
+
+    # Strip non-alphanumeric/space wrappers and retry as a year-bearing string.
+    cleaned = re.sub(r"[^A-Za-z0-9/\-\s,]", " ", str(value)).strip()
+    cleaned = " ".join(cleaned.split())
+    if not cleaned:
+        return None
+
+    try:
+        return _parse_date(cleaned)
+    except ValueError:
+        pass
+
+    # No year in the string — try inferring from the academic window.
+    if academic_start is not None and academic_end is not None:
+        for year in (academic_start.year, academic_end.year):
+            candidate = f"{cleaned} {year}"
+            try:
+                parsed = _parse_date(candidate)
+            except ValueError:
+                continue
+            if academic_start <= parsed <= academic_end:
+                return parsed
+
+    return None
+
+
+def _find_holiday_header_row(ws, max_scan_rows: int = 15) -> Optional[int]:
+    """Locate the row whose column A holds 'Holiday' / 'Holidays'.
+
+    Scans the first `max_scan_rows` rows. Case-insensitive, trimmed.
+    Returns 1-based row index or None.
+    """
+    upper_bound = min(ws.max_row, max_scan_rows)
+    for r in range(1, upper_bound + 1):
+        v = ws.cell(row=r, column=1).value
+        if v is None:
+            continue
+        if str(v).strip().lower() in _HOLIDAY_HEADER_LABELS:
+            return r
+    return None
+
+
+def _find_holiday_date_row(
+    ws, header_row: int, holiday_columns: List[int],
+    academic_start: Optional[date], academic_end: Optional[date],
+) -> Optional[int]:
+    """Find the row containing parseable dates beneath the Holiday header.
+
+    Per spec the date row is 1 or 2 rows below the Holiday header. The
+    helper scans both candidate rows and picks the one where at least one
+    of the holiday columns yields a parseable date.
+    """
+    for offset in (1, 2):
+        candidate = header_row + offset
+        if candidate > ws.max_row:
+            return None
+        for col in holiday_columns:
+            v = ws.cell(row=candidate, column=col).value
+            if _parse_holiday_date_with_year_inference(
+                v, academic_start, academic_end
+            ) is not None:
+                return candidate
+    return None
+
+
+def load_holidays(
+    path: str = HOLIDAYS_XLSX,
+    *,
+    valid_residents: Optional[Iterable[str]] = None,
+    intern_names: Optional[Iterable[str]] = None,
+    academic_start: Optional[date] = None,
+    academic_end: Optional[date] = None,
+    known_rotations: Optional[Iterable[str]] = None,
+) -> Tuple[Dict[date, dict], Dict[str, Dict[date, str]]]:
+    """Load the holiday-rotation workbook → (holidays_dict, pre_holiday_no_call).
+
+    Workbook layout (one sheet, working-doc style):
+      - A row in column A labelled 'Holiday' (or 'Holidays', case-insensitive)
+        within the first ~15 rows. Columns to the right of A on that row hold
+        the holiday display names.
+      - 1 or 2 rows below the Holiday header row: a row of dates (one per
+        holiday column). Stray cells like ``****June 4****`` are tolerated
+        (asterisks stripped, year inferred from the academic window).
+      - Rows below the date row: PGY section markers ('PGY-1', 'PGY-2',
+        'PGY-3') interleaved with resident rows. Resident rows have a last
+        name in column A; each holiday column holds the rotation that
+        resident is working on the holiday (blank = not working).
+      - A right-most informational column commonly headed 'Total Holidays'
+        is detected and skipped.
+
+    Validation:
+      - `valid_residents`: every resident in this set must appear in the
+        workbook (hard error if missing); every name in the workbook must
+        match this set (hard error if unknown). Last-name comparison is
+        case-insensitive + whitespace-trimmed.
+      - `known_rotations`: rotation cell values not in this set emit a
+        warning (NOT a hard error). ER-prefixed values are exempt.
+
+    ER handling:
+      - Any cell whose value starts with 'ER' (case-insensitive, optional
+        space-anything suffix) marks the resident as the ER call for that
+        holiday. ER residents are sorted into ``uppers`` (PGY2/3) or
+        ``interns`` (PGY1) lists on the holiday's dict entry. Multiple ER
+        residents in the same PGY band on the same holiday are accepted
+        (the audit will surface the count mismatch but execution
+        continues).
+
+    Day-before block:
+      - For every resident with a non-empty rotation cell on holiday D
+        (ER or not), date D-1 is added to a per-resident no-call map
+        with reason 'pre_holiday'. The scheduler merges this into its
+        eligibility filter so the resident isn't scheduled for regular
+        call the night before they work a holiday rotation.
+
+    Returns:
+      - ``holidays_dict[d] = {
+            "name": str,
+            "uppers": [pgy23_er_names],
+            "interns": [pgy1_er_names],
+            "rotations": {resident: rotation_str},
+        }``
+      - ``pre_holiday_no_call[resident] = {date: 'pre_holiday'}``
+    """
+    holidays_out: Dict[date, dict] = {}
+    pre_holiday_no_call: Dict[str, Dict[date, str]] = {}
+
+    try:
+        wb = load_workbook(path, data_only=True)
+    except FileNotFoundError:
+        return holidays_out, pre_holiday_no_call
+
+    ws = wb.active
+
+    header_row = _find_holiday_header_row(ws)
+    if header_row is None:
+        raise DataValidationError(
+            "holidays.xlsx: could not find a 'Holiday' header in column A "
+            "within the first 15 rows. The header row tells the loader "
+            "where to find holiday names and dates."
+        )
+
+    # Identify holiday columns from the header row. A holiday column is
+    # any column (B+) whose holiday-name cell is non-empty and doesn't
+    # look like a total column.
+    holiday_columns: List[int] = []
+    holiday_names: Dict[int, str] = {}
+    for c in range(2, ws.max_column + 1):
+        v = ws.cell(row=header_row, column=c).value
+        if v is None or str(v).strip() == "":
+            continue
+        name_str = str(v).strip()
+        if any(kw in name_str.lower() for kw in _TOTAL_COLUMN_KEYWORDS):
+            continue
+        holiday_columns.append(c)
+        holiday_names[c] = name_str
+
+    if not holiday_columns:
+        raise DataValidationError(
+            f"holidays.xlsx: 'Holiday' header found at row {header_row} "
+            f"but no holiday-name columns to the right. Expected one "
+            f"column per holiday with the holiday name in row {header_row}."
+        )
+
+    date_row = _find_holiday_date_row(
+        ws, header_row, holiday_columns, academic_start, academic_end
+    )
+    if date_row is None:
+        raise DataValidationError(
+            f"holidays.xlsx: 'Holiday' header at row {header_row} but no "
+            f"parseable date row found in the next two rows. The date row "
+            f"should contain one date per holiday column."
+        )
+
+    # Resolve each holiday column → its date (or skip with warning).
+    column_dates: Dict[int, date] = {}
+    for col in holiday_columns:
+        raw = ws.cell(row=date_row, column=col).value
+        parsed = _parse_holiday_date_with_year_inference(
+            raw, academic_start, academic_end
+        )
+        if parsed is None:
+            warnings.warn(
+                f"holidays.xlsx column {col} ('{holiday_names[col]}'): "
+                f"cell at row {date_row} is not a parseable date "
+                f"(value={raw!r}). Skipping this holiday.",
+                stacklevel=2,
+            )
+            continue
+        if academic_start is not None and academic_end is not None:
+            if parsed < academic_start or parsed > academic_end:
+                warnings.warn(
+                    f"holidays.xlsx column {col} ('{holiday_names[col]}'): "
+                    f"date {parsed} is outside the academic year "
+                    f"({academic_start} to {academic_end}). Skipping.",
+                    stacklevel=2,
+                )
+                continue
+        column_dates[col] = parsed
+
+    # Last-name canonicalisation map: lowercase → canonical (flow) spelling.
+    last_name_lookup: Optional[Dict[str, str]] = None
+    flow_names_canonical: set = set()
+    if valid_residents is not None:
+        last_name_lookup = {n.strip().lower(): n for n in valid_residents}
+        flow_names_canonical = set(valid_residents)
+
+    intern_set = set(intern_names) if intern_names is not None else None
+
+    rotation_lookup_lower: Optional[set] = None
+    if known_rotations is not None:
+        rotation_lookup_lower = {r.strip().lower() for r in known_rotations if r}
+
+    seen_residents: set = set()
+    unknown_rotations_warned: set = set()
+
+    # Process rows below the date row. Skip PGY section markers; expect
+    # resident-name + per-holiday rotation cells everywhere else.
+    for r in range(date_row + 1, ws.max_row + 1):
+        col_a = ws.cell(row=r, column=1).value
+        if col_a is None or str(col_a).strip() == "":
+            continue
+        col_a_str = str(col_a).strip()
+        lowered = col_a_str.lower().replace(" ", "")
+        if lowered in _PGY_SECTION_LABELS:
+            continue
+
+        # Treat col A as a resident last name.
+        if last_name_lookup is not None:
+            canonical = last_name_lookup.get(col_a_str.lower())
+            if canonical is None:
+                raise DataValidationError(
+                    f"holidays.xlsx row {r}: resident last name "
+                    f"'{col_a_str}' does not match any resident in the "
+                    f"flow sheet. Names must match (case-insensitive)."
+                )
+            resident = canonical
+        else:
+            resident = col_a_str
+
+        seen_residents.add(resident)
+
+        # Process each holiday column for this resident.
+        for col, d in column_dates.items():
+            v = ws.cell(row=r, column=col).value
+            if v is None or str(v).strip() == "":
+                continue
+            rotation_str = str(v).strip()
+
+            # Initialise the holiday's entry if needed.
+            entry = holidays_out.setdefault(d, {
+                "name": holiday_names[col],
+                "uppers": [],
+                "interns": [],
+                "rotations": {},
+            })
+
+            # Same date, different sheet column: shouldn't happen but if
+            # two columns resolve to the same date, the first name wins.
+            entry["rotations"][resident] = rotation_str
+
+            is_er = _is_er_rotation(rotation_str)
+
+            # Day-before block applies to every listed resident, regardless
+            # of ER status.
+            d_minus_1 = d - timedelta(days=1)
+            if academic_start is None or d_minus_1 >= academic_start:
+                pre_holiday_no_call.setdefault(resident, {})[d_minus_1] = "pre_holiday"
+
+            if is_er:
+                if intern_set is not None and resident in intern_set:
+                    entry["interns"].append(resident)
+                else:
+                    entry["uppers"].append(resident)
+            else:
+                # Non-ER rotation — emit a warning if it doesn't look like
+                # any known rotation code from flow / rotation_rules.
+                if rotation_lookup_lower is not None:
+                    if rotation_str.lower() not in rotation_lookup_lower:
+                        key = (resident, d, rotation_str)
+                        if key not in unknown_rotations_warned:
+                            unknown_rotations_warned.add(key)
+                            warnings.warn(
+                                f"holidays.xlsx row {r} col {col} "
+                                f"({holiday_names[col]} {d}): rotation "
+                                f"'{rotation_str}' for {resident} doesn't "
+                                f"match any known rotation code. Accepted "
+                                f"as written.",
+                                stacklevel=2,
+                            )
+
+    # Cross-check: every resident in flow must be listed.
+    if last_name_lookup is not None:
+        missing = sorted(flow_names_canonical - seen_residents)
+        if missing:
+            raise DataValidationError(
+                f"holidays.xlsx is missing rows for {len(missing)} "
+                f"resident(s) from the flow sheet: "
+                f"{', '.join(missing)}. Every resident must have a row "
+                f"(blank cells are OK; the row just needs to exist)."
+            )
+
+    return holidays_out, pre_holiday_no_call
 
 
 CLINIC_HEADER_SCAN_ROWS = 10

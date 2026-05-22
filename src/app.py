@@ -270,7 +270,66 @@ def _validate_no_call(path: Path) -> Optional[str]:
 
 
 def _validate_holidays(path: Path) -> Optional[str]:
-    return _validate_required_headers(path, {"date"}, "Holidays")
+    """Upload-time shape check for the holiday-rotation workbook.
+
+    Verifies the workbook can be opened, finds a 'Holiday' header in
+    column A within the first 15 rows, finds a date row 1 or 2 rows
+    below it, and identifies at least one holiday column to the right.
+    Cross-validation against the flow sheet (resident names, every
+    flow resident represented) happens at run time in load_data_bundle
+    because it requires reading two files together.
+    """
+    try:
+        from openpyxl import load_workbook as _lw
+        wb = _lw(path, data_only=True)
+    except Exception as e:
+        return f"Holidays error: could not open workbook ({e})."
+
+    ws = wb.active
+
+    from loader import _find_holiday_header_row, _find_holiday_date_row
+    from loader import _parse_holiday_date_with_year_inference
+
+    header_row = _find_holiday_header_row(ws)
+    if header_row is None:
+        return (
+            "Holidays error: no 'Holiday' header in column A within the "
+            "first 15 rows. Column A row should read 'Holiday' (or "
+            "'Holidays') on the row where holiday names appear in the "
+            "columns to the right."
+        )
+
+    # Identify holiday columns from the header row.
+    holiday_cols = []
+    for c in range(2, ws.max_column + 1):
+        v = ws.cell(row=header_row, column=c).value
+        if v is None or str(v).strip() == "":
+            continue
+        if "total" in str(v).strip().lower():
+            continue
+        holiday_cols.append(c)
+
+    if not holiday_cols:
+        return (
+            f"Holidays error: 'Holiday' header at row {header_row} but no "
+            f"holiday-name columns to the right. Each holiday should have "
+            f"its name in row {header_row} of its own column."
+        )
+
+    # Without academic_start/end at upload time, we can only check that at
+    # least one cell in the next two rows parses as a date in *some* form.
+    date_row = _find_holiday_date_row(
+        ws, header_row, holiday_cols, academic_start=None, academic_end=None
+    )
+    if date_row is None:
+        return (
+            f"Holidays error: 'Holiday' header at row {header_row} but no "
+            f"parseable date row in rows {header_row + 1} or "
+            f"{header_row + 2}. Each holiday column should have a date "
+            f"value directly below its name."
+        )
+
+    return None
 
 
 def _validate_clinic(path: Path) -> Optional[str]:
@@ -362,7 +421,7 @@ UPLOAD_SLOTS: list[UploadSlot] = [
         saved_filename="holidays.xlsx",
         required=True,
         validator=_validate_holidays,
-        help="Columns: date, name, upper, intern. May be empty if there are no holiday pre-assignments.",
+        help="Single-sheet workbook. Column A row labelled 'Holiday' with holiday names in columns B+, dates 1-2 rows below, then a resident-per-row grid where each cell is the resident's rotation on that holiday (ER variants count as a call assignment).",
     ),
     UploadSlot(
         key="clinic_days",

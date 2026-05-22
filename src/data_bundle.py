@@ -8,9 +8,10 @@ files came from.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Dict, List, Optional, Tuple
 
+from config import CONFIG
 from excel_reader import ExcelRotationLookup
 from loader import (
     load_clinic_days,
@@ -20,6 +21,41 @@ from loader import (
     load_residents,
     load_rotation_rules,
 )
+
+_NIGHT_FLOAT_ROTATION_NAME = CONFIG.get("NIGHT_FLOAT_ROTATION_NAME", "NF")
+
+
+def _compute_pre_nf_no_call(
+    lookup, residents: Dict[str, dict],
+    academic_start: Optional[date], academic_end: Optional[date],
+) -> Dict[str, Dict[date, str]]:
+    """Block each intern from regular call on the day BEFORE a Night Float day.
+
+    For every PGY1, walk the academic year date-by-date and check
+    rotation_on_date(D+1). If it's NF, add D to that intern's no-call map
+    with reason 'pre_nf'. This covers the day-before-start-of-NF case
+    (rotation switches from non-NF to NF) automatically; days fully inside
+    an NF block are also covered but are no-ops because NF itself is
+    typically NO_CALL.
+    """
+    out: Dict[str, Dict[date, str]] = {}
+    if academic_start is None or academic_end is None:
+        return out
+
+    interns = [name for name, info in residents.items() if info.get("pgy") == 1]
+    if not interns:
+        return out
+
+    d = academic_start
+    while d < academic_end:
+        d_next = d + timedelta(days=1)
+        for name in interns:
+            rot_next = lookup.rotation_on_date(name, d_next)
+            if rot_next and rot_next.upper() == _NIGHT_FLOAT_ROTATION_NAME.upper():
+                out.setdefault(name, {})[d] = "pre_nf"
+        d += timedelta(days=1)
+
+    return out
 
 
 @dataclass
@@ -100,8 +136,34 @@ def load_data_bundle(
         academic_end=academic_end_date,
         blocks=lookup.blocks,
     )
+    # Holidays workbook: now also produces per-resident day-before blocks
+    # for every resident with a non-empty rotation cell on a holiday.
+    intern_names = [name for name, info in residents.items() if info.get("pgy") == 1]
+    rule_rotation_codes = {rotation for (rotation, _pgy) in rules.keys()}
+    flow_rotation_codes: set = set()
+    for _name, _by_date in getattr(lookup, "rotation_by_resident_date", {}).items():
+        flow_rotation_codes.update(v for v in _by_date.values() if v)
+    holidays, pre_holiday_no_call = load_holidays(
+        paths["holidays_xlsx"],
+        valid_residents=residents.keys(),
+        intern_names=intern_names,
+        academic_start=academic_start_date,
+        academic_end=academic_end_date,
+        known_rotations=rule_rotation_codes | flow_rotation_codes,
+    )
+
+    # Night-float pre-call: intern can't take regular call the day before
+    # their rotation switches to NF.
+    pre_nf_no_call = _compute_pre_nf_no_call(
+        lookup, residents, academic_start_date, academic_end_date
+    )
+
+    # Compose the final no_call view: time-off (manual) + clinic-derived +
+    # pre-holiday blocks + pre-NF blocks. _merge_no_call only handles two
+    # dicts at a time, so chain them.
     no_call = _merge_no_call(no_call_base, clinic_pre_blocks)
-    holidays = load_holidays(paths["holidays_xlsx"])
+    no_call = _merge_no_call(no_call, pre_holiday_no_call)
+    no_call = _merge_no_call(no_call, pre_nf_no_call)
 
     if use_completed_calls:
         completed_calls = load_completed_calls(
