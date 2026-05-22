@@ -1,7 +1,9 @@
 /.idea/
-/data/output/audit_report.txt
-/data/output/call_schedule.xlsx
-/data/output/call_totals.xlsx
+
+# Generated outputs — overwritten every run, never committed.
+/output_files/audit_report.txt
+/output_files/call_schedule.xlsx
+/output_files/call_totals.xlsx
 
 # Claude Code state and worktrees
 .claude/

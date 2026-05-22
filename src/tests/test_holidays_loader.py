@@ -7,8 +7,8 @@ hard-error on missing/unknown residents, rotation-name warnings — so the
 unit tests construct workbooks programmatically to exercise each branch.
 
 The integration tests then run the full pipeline against the real input
-files in data/ and verify the day-of/day-before holiday rules and the
-pre-NF intern rule are actually applied in the produced schedule.
+files in input_files/ and verify the day-of/day-before holiday rules
+and the pre-NF intern rule are actually applied in the produced schedule.
 """
 
 from __future__ import annotations

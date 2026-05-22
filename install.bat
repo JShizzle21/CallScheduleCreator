@@ -8,7 +8,7 @@ REM      on the ~300MB of pyarrow/pandas binaries we pull in).
 REM   2. Downloads Python 3.14.3 embeddable distribution + extracts it.
 REM   3. Edits python314._pth to enable site-packages imports.
 REM   4. Bootstraps pip via get-pip.py.
-REM   5. Installs runtime dependencies from requirements.txt.
+REM   5. Installs runtime dependencies from docs\requirements.txt.
 REM
 REM Idempotent — re-running skips steps that are already done. To force a
 REM clean reinstall, delete %LOCALAPPDATA%\CallScheduler first.
@@ -26,7 +26,7 @@ set "PY_DIR=%INSTALL_DIR%\python_embed"
 set "PY_EXE=%PY_DIR%\python.exe"
 set "PY_PTH=%PY_DIR%\python%PY_TAG%._pth"
 set "PROJECT_DIR=%~dp0"
-set "REQ_FILE=%PROJECT_DIR%requirements.txt"
+set "REQ_FILE=%PROJECT_DIR%docs\requirements.txt"
 
 echo.
 echo ============================================================
@@ -38,7 +38,7 @@ echo  Project folder:   %PROJECT_DIR%
 echo.
 
 if not exist "%REQ_FILE%" (
-    echo [ERROR] requirements.txt not found at:
+    echo [ERROR] docs\requirements.txt not found at:
     echo         %REQ_FILE%
     echo.
     echo  This installer must be run from the project folder. Make sure
@@ -104,7 +104,7 @@ if !errorlevel! equ 0 (
 )
 
 REM --- Step 5: Install runtime requirements -----------------------------------
-echo [5/5] Installing runtime dependencies from requirements.txt ...
+echo [5/5] Installing runtime dependencies from docs\requirements.txt ...
 echo       ^(This is the slow step — ~300 MB of wheels. Be patient.^)
 "%PY_EXE%" -m pip install --no-warn-script-location -r "%REQ_FILE%" || goto :fail
 

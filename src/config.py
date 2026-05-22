@@ -44,15 +44,15 @@ _PATH_KEY_MAP = {
 }
 
 _PATH_DEFAULTS = {
-    "flow_xlsx": "data/flow.xlsx",
+    "flow_xlsx": "input_files/flow.xlsx",
     "sheet_name": "master_block_calendar",
-    "rotation_rules_xlsx": "data/rotation_rules.xlsx",
-    "no_call_days_xlsx": "data/no_call_days.xlsx",
-    "holidays_xlsx": "data/holidays.xlsx",
-    "clinic_days_xlsx": "data/clinic_days.xlsx",
+    "rotation_rules_xlsx": "input_files/rotation_rules.xlsx",
+    "no_call_days_xlsx": "input_files/no_call_days.xlsx",
+    "holidays_xlsx": "input_files/holidays.xlsx",
+    "clinic_days_xlsx": "input_files/clinic_days.xlsx",
     "completed_calls_xlsx": "",
-    "data_dir": "data",
-    "output_dir": "output",
+    "data_dir": "input_files",
+    "output_dir": "output_files",
 }
 
 

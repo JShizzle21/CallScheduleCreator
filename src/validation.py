@@ -14,8 +14,8 @@ from typing import Optional
 # config.yaml instead of the user's overrides. (Regression history:
 # PGY3_CUTOFF_DATE drifted this way and produced false audit errors.)
 
-DATA_DIR = CONFIG.get("DATA_DIR", "data")
-OUTPUT_DIR = CONFIG.get("OUTPUT_DIR", "output")
+DATA_DIR = CONFIG.get("DATA_DIR", "input_files")
+OUTPUT_DIR = CONFIG.get("OUTPUT_DIR", "output_files")
 POST_CALL_DAYS = CONFIG.get("POST_CALL_DAYS", 2)
 INTERN_BLOCK1_WEEKDAY_CALLS = int(CONFIG.get("INTERN_BLOCK1_WEEKDAY_CALLS", 0))
 ACADEMIC_DATE_START_STRING = CONFIG.get("ACADEMIC_DATE_START_STRING", "2026-07-01")
@@ -41,8 +41,8 @@ def _apply_config(config: dict) -> None:
     global ACADEMIC_DATE_START_STRING, ACADEMIC_DATE_END_STRING
     global ACADEMIC_DATE_START, ACADEMIC_DATE_END, PGY3_CUTOFF_DATE
 
-    DATA_DIR = config.get("DATA_DIR", "data")
-    OUTPUT_DIR = config.get("OUTPUT_DIR", "output")
+    DATA_DIR = config.get("DATA_DIR", "input_files")
+    OUTPUT_DIR = config.get("OUTPUT_DIR", "output_files")
     POST_CALL_DAYS = int(config.get("POST_CALL_DAYS", 2))
     INTERN_BLOCK1_WEEKDAY_CALLS = int(config.get("INTERN_BLOCK1_WEEKDAY_CALLS", 0))
     ACADEMIC_DATE_START_STRING = config.get("ACADEMIC_DATE_START_STRING", "2026-07-01")

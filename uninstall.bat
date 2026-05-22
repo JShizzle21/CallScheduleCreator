@@ -75,7 +75,7 @@ echo ============================================================
 echo.
 echo  To remove the program files too, delete this folder from
 echo  Windows Explorer ^(it has install.bat, run.bat, README.md,
-echo   and the data\ subfolder in it^).
+echo   and the input_files\ + output_files\ subfolders in it^).
 echo.
 echo  To reinstall later, double-click install.bat.
 echo.

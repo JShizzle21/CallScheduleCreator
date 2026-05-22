@@ -7,10 +7,10 @@ from openpyxl import load_workbook
 from config import CONFIG
 from errors import DataValidationError
 
-ROTATION_RULES_XLSX = CONFIG.get("ROTATION_RULES_XLSX", "data/rotation_rules.xlsx")
-NO_CALL_DAYS_XLSX = CONFIG.get("NO_CALL_DAYS_XLSX", "data/no_call_days.xlsx")
-HOLIDAYS_XLSX = CONFIG.get("HOLIDAYS_XLSX", "data/holidays.xlsx")
-CLINIC_DAYS_XLSX = CONFIG.get("CLINIC_DAYS_XLSX", "data/clinic_days.xlsx")
+ROTATION_RULES_XLSX = CONFIG.get("ROTATION_RULES_XLSX", "input_files/rotation_rules.xlsx")
+NO_CALL_DAYS_XLSX = CONFIG.get("NO_CALL_DAYS_XLSX", "input_files/no_call_days.xlsx")
+HOLIDAYS_XLSX = CONFIG.get("HOLIDAYS_XLSX", "input_files/holidays.xlsx")
+CLINIC_DAYS_XLSX = CONFIG.get("CLINIC_DAYS_XLSX", "input_files/clinic_days.xlsx")
 COMPLETED_CALLS_XLSX = CONFIG.get("COMPLETED_CALLS_XLSX", "")
 
 

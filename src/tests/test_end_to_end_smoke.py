@@ -46,13 +46,13 @@ from config import load_default_config
 # Skip the entire module if data files aren't present (e.g. in a fresh
 # checkout that hasn't been populated yet). Avoids confusing failures
 # unrelated to code regressions.
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+DATA_DIR = Path(__file__).resolve().parent.parent.parent / "input_files"
 REQUIRED_FILES = ["flow.xlsx", "rotation_rules.xlsx"]
 missing = [f for f in REQUIRED_FILES if not (DATA_DIR / f).exists()]
 pytestmark = pytest.mark.skipif(
     bool(missing),
     reason=f"Required data files missing: {missing}. "
-    f"Smoke test only runs when data/ is populated.",
+    f"Smoke test only runs when input_files/ is populated.",
 )
 
 
@@ -72,7 +72,7 @@ def schedule_result():
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "data/clinic_days.xlsx currently contains placeholder data — Feb 11, "
+        "input_files/clinic_days.xlsx currently contains placeholder data — Feb 11, "
         "2027 is over-constrained (11 residents have clinic on Feb 12, plus "
         "1 post-call, 2 NO_CALL rotation), leaving no eligible upper. "
         "Remove this xfail when real clinic data is published."

@@ -24,14 +24,14 @@ If you ever need a clean reinstall, double-click `uninstall.bat`, then `install.
 
 ## What you need to prepare
 
-All input files live in the `data/` folder. You can edit them in Excel; **close the file before running the app** (Excel locks open files). The app also accepts uploads in the GUI — those override the files in `data/` for that run only.
+All input files live in the `input_files/` folder. You can edit them in Excel; **close the file before running the app** (Excel locks open files). The app also accepts uploads in the GUI — those override the files in `input_files/` for that run only.
 
 > **Date format flexibility.** Every date column accepts any of these formats interchangeably, and Excel-native date cells are always accepted:
 > `2026-07-01`, `7/1/2026`, `7/1/26`, `July 1 2026`, `July 1, 2026`, `1-Jul-2026`, `Jul 1, 2026`, `1 July 2026`. Use whichever is easiest in your workflow.
 
 > **Resident names must match exactly** across all input files (case-sensitive). `Prabhu` is not the same as `prabhu`. The flow sheet is the source of truth; if a name appears in another file but not in `flow.xlsx`, the app will stop with an error pointing at the offending row.
 
-> **Tip:** the files currently in `data/` are real working examples. Copy one as a template rather than starting from scratch.
+> **Tip:** the files currently in `input_files/` are real working examples. Copy one as a template rather than starting from scratch.
 
 ---
 
@@ -158,7 +158,7 @@ Used only when **"Partial year"** is enabled in the GUI. Tells the scheduler whi
 
 ## Reading the output
 
-After a successful run, three files land in `data/output/` and are also offered as download buttons in the GUI.
+After a successful run, three files land in `output_files/` (a sibling folder to `input_files/` at the project root) and are also offered as download buttons in the GUI.
 
 | File | Audience | What's in it |
 |---|---|---|
@@ -170,9 +170,9 @@ After a successful run, three files land in `data/output/` and are also offered 
 
 ## Day-to-day workflow
 
-1. **Update `data/flow.xlsx`** with the new academic year's rotations.
-2. **Update `data/no_call_days.xlsx`** with the year's vacations and conferences as you collect them.
-3. **Update `data/holidays.xlsx`** with the year's holidays. Leave the upper/intern columns blank if you want the scheduler to assign them, or fill them in to lock specific people.
+1. **Update `input_files/flow.xlsx`** with the new academic year's rotations.
+2. **Update `input_files/no_call_days.xlsx`** with the year's vacations and conferences as you collect them.
+3. **Update `input_files/holidays.xlsx`** with the year's holidays. Leave the upper/intern columns blank if you want the scheduler to assign them, or fill them in to lock specific people.
 4. **Run the app** (`run.bat`).
 5. **Click "Run schedule."** Wait for it to finish (~30 seconds for 1000 simulations).
 6. **Open `audit_report.txt`** and skim the Errors and Unassigned sections. Fix anything flagged.
@@ -202,7 +202,7 @@ If you do change weights and find a setting you like, click **"Save as defaults"
 
 ### How do I generate a partial-year schedule (mid-year handoff)?
 
-1. Fill in `data/completed_calls.xlsx` with all calls already assigned (columns `date`, `upper`, `intern` — see the [Input files](#optional-input-files) section above for full format details).
+1. Fill in `input_files/completed_calls.xlsx` with all calls already assigned (columns `date`, `upper`, `intern` — see the [Input files](#optional-input-files) section above for full format details).
 2. In the GUI, toggle **"Use completed calls"** on.
 3. Run. The scheduler picks up from the day after the last completed call.
 
@@ -224,7 +224,7 @@ Source lives at: *(project repo URL)*. Architecture details are in `CLAUDE.md` (
 
 | Location | Contents | Safe to delete? |
 |---|---|---|
-| Project folder (this directory) | Source code, your input files (`data/`), output files (`data/output/`) | Backup `data/` first. Everything else is replaceable from the repo. |
+| Project folder (this directory) | Code (`src/`), your inputs (`input_files/`), generated outputs (`output_files/`), docs (`docs/`) | Back up `input_files/` first. Everything else is replaceable from the repo. |
 | `%LOCALAPPDATA%\CallScheduler\` | Embedded Python + dependencies (~400 MB) | Yes — use `uninstall.bat` (then `install.bat` to recreate). |
 | `%TEMP%\tmp*` | Streamlit upload staging dirs | Yes — `run.bat` cleans up dirs older than 7 days at startup. |
 
@@ -234,6 +234,7 @@ Source lives at: *(project repo URL)*. Architecture details are in `CLAUDE.md` (
 
 - `CLAUDE.md` — architecture, scheduler internals, scoring/ranking design.
 - `docs/gui_plan.md` — GUI design spec and as-built notes.
-- `tests/` — pytest suite. Run with `.venv/Scripts/python.exe -m pytest tests/`.
+- `src/tests/` — pytest suite. Run with `.venv/Scripts/python.exe -m pytest src/tests/`.
 - Dev launch (skips `run.bat`): `.venv/Scripts/python.exe -m streamlit run src/app.py` from the project root.
-- Project layout: end-user-facing files (`README.md`, `install.bat`, `run.bat`, `requirements.txt`, `scheduler_main.py`) live at the root; internal modules and `config.yaml` live in `src/`. `scheduler_main.py` and `src/app.py` each prepend the appropriate path to `sys.path` at import time, so existing flat imports (`from config import X`) work unchanged.
+- CLI scheduler (no GUI): `.venv/Scripts/python.exe src/scheduler_main.py` from the project root.
+- Project layout: end-user-facing files (`README.md`, `install.bat`, `run.bat`, `uninstall.bat`) and the two data folders (`input_files/`, `output_files/`) live at the root. All Python source, `config.yaml`, and the test suite live in `src/` (`src/tests/`). `requirements.txt` and design docs live in `docs/`. `src/scheduler_main.py` and `src/app.py` each add `src/` to `sys.path` at import time so existing flat imports (`from config import X`) work unchanged.

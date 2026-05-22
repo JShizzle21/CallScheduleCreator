@@ -27,8 +27,8 @@ from errors import DataValidationError
 from loader import load_no_call_days
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = PROJECT_ROOT / "data"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+DATA_DIR = PROJECT_ROOT / "input_files"
 
 
 def _build_workbook(tmp_path: Path, rows_by_block: dict) -> Path:

@@ -24,7 +24,7 @@ def test_save_config_updates_values_and_preserves_unrelated_keys(tmp_path):
         "# header comment\n"
         "FAIRNESS_GAP_WEIGHT: 3.0\n"
         "SPACING_WEIGHT: 1.0\n"
-        "FLOW_XLSX: data/flow.xlsx\n",
+        "FLOW_XLSX: input_files/flow.xlsx\n",
     )
 
     save_config({"FAIRNESS_GAP_WEIGHT": 5.5}, path=str(cfg))
@@ -32,7 +32,7 @@ def test_save_config_updates_values_and_preserves_unrelated_keys(tmp_path):
     loaded = load_config(str(cfg))
     assert loaded["FAIRNESS_GAP_WEIGHT"] == 5.5
     assert loaded["SPACING_WEIGHT"] == 1.0
-    assert loaded["FLOW_XLSX"] == "data/flow.xlsx"
+    assert loaded["FLOW_XLSX"] == "input_files/flow.xlsx"
 
 
 def test_save_config_preserves_comments(tmp_path):

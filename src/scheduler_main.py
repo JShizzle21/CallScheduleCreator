@@ -12,10 +12,13 @@ from datetime import date, datetime, timedelta
 from functools import partial
 from typing import Callable, Dict, List, Tuple, Optional
 
-# All internal modules live in src/ — keep them off the project root to reduce
-# clutter for end users. Add src/ to the import path so existing flat-style
-# imports (`from config import X`) keep working without per-file changes.
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
+# This module lives in src/ alongside config, loader, etc. When invoked as a
+# script (`python src/scheduler_main.py` from the project root) Python's
+# import path doesn't include src/ by default, so flat-style imports like
+# `from config import X` would fail. Add src/ (== this file's directory)
+# explicitly so the same imports work in both script mode and library mode
+# (used by app.py and the test suite).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import CONFIG, load_default_config, legacy_gui_config_warning
 from data_bundle import DataBundle, load_data_bundle
@@ -1420,7 +1423,12 @@ def export_result(result, paths: dict):
 
     intern_names = [n for n, r in residents.items() if r["pgy"] == 1]
 
-    out_dir = f"{paths['data_dir']}/{paths['output_dir']}"
+    # `output_dir` is now an independent top-level folder (output_files/)
+    # rather than nested under data_dir, so we use it directly. data_dir
+    # is preserved on the paths dict for legacy callers but no longer
+    # contributes to the output location.
+    out_dir = paths["output_dir"]
+    os.makedirs(out_dir, exist_ok=True)
     write_call_totals_xlsx(residents, f"{out_dir}/call_totals.xlsx")
     write_call_schedule_xlsx(
         schedule_rows,

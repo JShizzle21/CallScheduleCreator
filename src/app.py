@@ -33,11 +33,12 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-# scheduler_main lives at the project root (one level up from src/).
-# Streamlit puts the script's own directory (src/) on sys.path automatically,
-# but not the parent — add it explicitly so `from scheduler_main import ...`
-# below works regardless of how app.py is launched.
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# scheduler_main now lives in src/ alongside app.py. Streamlit puts the
+# script's own directory (src/) on sys.path automatically, so flat imports
+# below work without extra path manipulation. This line is retained as a
+# safety net in case app.py is invoked in an unusual way (e.g. imported
+# from a notebook outside the project tree).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import pandas as pd
 import streamlit as st
@@ -1369,9 +1370,11 @@ def _render_settings_section() -> tuple[bool, list[str]]:
 QUICK_PREVIEW_RUNS = 100
 
 # Output directory for the three xlsx/txt artifacts. Spec §2 says these
-# overwrite each run, matching CLI behavior.
-OUTPUT_SUBDIR = "output"
-DATA_DIR_FOR_OUTPUT = "data"
+# overwrite each run, matching CLI behavior. After the May refactor, the
+# output folder is a sibling of input_files/ at the project root rather
+# than nested under data/, so OUTPUT_SUBDIR is the full relative path.
+OUTPUT_SUBDIR = "output_files"
+DATA_DIR_FOR_OUTPUT = "input_files"
 
 # Polling cadence while a run is in flight. Drives the time.sleep() →
 # st.rerun() loop at the bottom of main(). Short enough that the log
@@ -1761,7 +1764,10 @@ def _format_score_tuple(score, order: list[str]) -> str:
 
 
 def _output_paths() -> dict:
-    base = Path(DATA_DIR_FOR_OUTPUT) / OUTPUT_SUBDIR
+    # OUTPUT_SUBDIR is now a top-level folder ('output_files'), not nested
+    # under DATA_DIR_FOR_OUTPUT — using it directly keeps GUI download
+    # paths in sync with the CLI's out_dir.
+    base = Path(OUTPUT_SUBDIR)
     return {
         "schedule": base / "call_schedule.xlsx",
         "totals": base / "call_totals.xlsx",

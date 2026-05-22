@@ -7,8 +7,8 @@ from openpyxl.utils import get_column_letter
 from config import CONFIG
 
 NIGHT_FLOAT_ROTATION_NAME = CONFIG.get("NIGHT_FLOAT_ROTATION_NAME", "NF")
-DATA_DIR = CONFIG.get("DATA_DIR", "data")
-OUTPUT_DIR = CONFIG.get("OUTPUT_DIR", "output")
+DATA_DIR = CONFIG.get("DATA_DIR", "input_files")
+OUTPUT_DIR = CONFIG.get("OUTPUT_DIR", "output_files")
 
 
 def _autosize_columns(ws):
@@ -259,7 +259,7 @@ def write_call_schedule_xlsx(
     wb.save(path)
 
 
-def write_audit(audit_data, path=f"{DATA_DIR}/{OUTPUT_DIR}/audit_report.txt"):
+def write_audit(audit_data, path=f"{OUTPUT_DIR}/audit_report.txt"):
     with open(path, "w", encoding="utf-8") as f:
         f.write("SCHEDULE AUDIT REPORT\n")
         f.write("=" * 60 + "\n\n")

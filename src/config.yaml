@@ -9,24 +9,28 @@ ACADEMIC_DATE_END_STRING: "2027-06-30"
 # Minimum number of post-call days until another call can be assigned
 POST_CALL_DAYS: 2
 
-# Folder names
-DATA_DIR: "data"
-OUTPUT_DIR: "output"
-FLOW_XLSX: "data/flow.xlsx"
-HOLIDAYS_XLSX: "data/holidays.xlsx"
-NO_CALL_DAYS_XLSX: "data/no_call_days.xlsx"
-ROTATION_RULES_XLSX: "data/rotation_rules.xlsx"
+# Folder names. DATA_DIR holds the user-prepared input workbooks; OUTPUT_DIR
+# is where the three generated artifacts (call_schedule.xlsx,
+# call_totals.xlsx, audit_report.txt) land. Both are sibling directories
+# at the project root so the user can drop new inputs in or grab outputs
+# without digging into a nested layout.
+DATA_DIR: "input_files"
+OUTPUT_DIR: "output_files"
+FLOW_XLSX: "input_files/flow.xlsx"
+HOLIDAYS_XLSX: "input_files/holidays.xlsx"
+NO_CALL_DAYS_XLSX: "input_files/no_call_days.xlsx"
+ROTATION_RULES_XLSX: "input_files/rotation_rules.xlsx"
 SHEET_NAME: "master_block_calendar"
 # Columns: name, date — one row per clinic day.
 # The day BEFORE each clinic will be blocked as a no-call day (pre_clinic_day).
 # Leave as-is if file does not exist; clinics are optional.
-CLINIC_DAYS_XLSX: "data/clinic_days.xlsx"
+CLINIC_DAYS_XLSX: "input_files/clinic_days.xlsx"
 # Partial year mode.
 # USE_COMPLETED_CALLS: 0 = generate full-year schedule from scratch (ignores COMPLETED_CALLS_XLSX).
 # USE_COMPLETED_CALLS: 1 = seed from COMPLETED_CALLS_XLSX and restart the day after the last completed call.
 # Columns in the file: date, [upper level name], [intern name] — blank cells mean no assignment.
 USE_COMPLETED_CALLS: 0
-COMPLETED_CALLS_XLSX: "data/completed_calls.xlsx"
+COMPLETED_CALLS_XLSX: "input_files/completed_calls.xlsx"
 # Block 1 intern daily calls: set to 1 if interns take call every weekday + weekend in Block 1
 # (same as upper level). Set to 0 if Block 1 interns use Night Float (weekdays don't count).
 INTERN_BLOCK1_WEEKDAY_CALLS: 1
